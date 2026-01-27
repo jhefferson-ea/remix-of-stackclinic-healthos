@@ -1,33 +1,59 @@
 
 
-# Plano: Corrigir Salvamento de Mensagens + Token de Autenticação
+# Plano: Correção de Ordenação, Timezone e Otimização do Banco
 
 ## Problemas Identificados
 
-### Problema 1: Mensagens não salvas na tabela `whatsapp_messages`
+### 1. Mensagens em Ordem Errada no Drawer
+**Diagnóstico**: O endpoint `conversation.php` ordena por `ORDER BY created_at ASC`, que deveria funcionar. Porém, o problema é que as mensagens estão sendo inseridas com timestamps errados devido a:
+- O `simulate-chat.php` usa `NOW()` para ambas as mensagens (incoming e outgoing), que são inseridas no mesmo segundo
+- Como `incoming` e `outgoing` têm o mesmo timestamp, a ordem fica indeterminada
 
-**Diagnóstico**: Olhando o print da tabela:
-- Só existem mensagens `direction = 'incoming'` (do usuário)
-- **Faltam as respostas da IA** (`direction = 'outgoing'`)
+**Solução**: Adicionar `ORDER BY id ASC` (que é sequencial e garantido) em vez de `created_at`.
 
-**Causa raiz**: O arquivo `simulate-chat.php` (simulador de chat) **NÃO está salvando mensagens** na tabela `whatsapp_messages`. Ele apenas armazena no JSON da sessão (`whatsapp_sessions.context`).
-
-O salvamento de mensagens (`INSERT INTO whatsapp_messages`) só existe no `webhook/whatsapp.php` (para WhatsApp real), mas o simulador não faz isso.
-
-**Fluxo atual (ERRADO)**:
-```text
-simulate-chat.php:
-  ✓ Salva contexto em whatsapp_sessions.context (JSON)
-  ✗ NÃO salva em whatsapp_messages (tabela)
+### 2. IA Não Respeita Horário de Funcionamento
+**Diagnóstico**: A função `checkAvailability()` (linhas 713-800) consulta corretamente `horario_funcionamento`:
+```php
+$stmt = $this->db->prepare("
+    SELECT `open`, `close` FROM horario_funcionamento 
+    WHERE clinica_id = :clinica_id AND day = :day_of_week AND active = 1
+");
 ```
 
-### Problema 2: Token de autenticação não chega ao backend
+O problema é a comparação `$isToday && $startTime <= $now`:
+```php
+$now = time();  // Usa timestamp do SERVIDOR (que pode estar 3h adiantado)
+$isToday = (date('Y-m-d') === $date);
+while ($startTime < $endTime) {
+    if ($isToday && $startTime <= $now) $isAvailable = false;  // PROBLEMA AQUI
+}
+```
 
-**Diagnóstico**: Mesmo enviando `Authorization` e `X-Auth-Token`, o backend retorna "Token não fornecido".
+O servidor está em UTC (3h adiantado em relação a Brasília). Se você está às 20h, o servidor acha que são 23h, e descarta todos os horários.
 
-**Causa raiz**: O servidor (Hostinger LiteSpeed) pode estar removendo os headers. O fallback do X-Auth-Token existe, mas precisa ser garantido que:
-1. O header está sendo listado corretamente no CORS
-2. O `.htaccess` está passando o header para o PHP
+**Solução**: Configurar timezone do PHP para America/Sao_Paulo no início dos scripts.
+
+### 3. Fuso Horário do Banco (3h adiantado)
+**Diagnóstico**: O banco (MySQL/MariaDB) e o PHP estão usando UTC por padrão, enquanto você está no fuso de Brasília (UTC-3).
+
+Quando o código faz `NOW()` ou `date('Y-m-d H:i:s')`, ele grava no horário do servidor (UTC), não no seu horário local.
+
+**Solução**: 
+1. Definir timezone no PHP: `date_default_timezone_set('America/Sao_Paulo')`
+2. Definir timezone na conexão MySQL: `SET time_zone = '-03:00'`
+
+### 4. Escalabilidade do Banco (1 linha por mensagem)
+**Diagnóstico**: Sim, cada mensagem gera uma linha. Isso é o padrão da indústria (WhatsApp, Telegram, todos fazem assim).
+
+**Por que é OK**:
+- Índices já existem: `idx_wpp_msg_phone_date` em `(phone, created_at DESC)`
+- Queries são filtradas por `clinica_id` + `phone`, muito rápidas
+- 100 clínicas × 100 mensagens/dia × 365 dias = ~3.6M linhas/ano = trivial para MySQL
+
+**Otimizações recomendadas**:
+1. Adicionar política de arquivamento (mover mensagens > 1 ano para tabela `whatsapp_messages_archive`)
+2. Adicionar índice composto para a query de conversa: `(clinica_id, phone, id)`
+3. Para consultas do drawer, limitar a últimas 100 mensagens
 
 ---
 
@@ -35,153 +61,111 @@ simulate-chat.php:
 
 | Arquivo | Alteração |
 |---------|-----------|
-| `backend/api/ai/simulate-chat.php` | Salvar mensagens incoming/outgoing na tabela `whatsapp_messages` |
-| `backend/api/.htaccess` | Adicionar regra para passar X-Auth-Token |
-| `backend/api/helpers/Auth.php` | Melhorar debug do X-Auth-Token |
+| `backend/api/config/Database.php` | Configurar timezone na conexão |
+| `backend/api/appointments/conversation.php` | Ordenar por `id` em vez de `created_at` |
+| `backend/api/services/OpenAIService.php` | Adicionar timezone no início |
+| `backend/api/ai/simulate-chat.php` | Adicionar timezone no início |
 
 ---
 
 ## Mudanças Técnicas
 
-### 1. Salvar Mensagens no Simulador (`simulate-chat.php`)
+### 1. Configurar Timezone na Conexão do Banco
 
-Adicionar dois INSERTs após processar a mensagem:
-
-```php
-// =========================================
-// 10. SALVA MENSAGENS na tabela whatsapp_messages
-// =========================================
-
-// Salva mensagem INCOMING (do usuário)
-$stmt = $db->prepare("
-    INSERT INTO whatsapp_messages 
-    (clinica_id, paciente_id, phone, direction, message, message_type, ai_processed, created_at)
-    VALUES (:clinica_id, :paciente_id, :phone, 'incoming', :message, 'text', 1, NOW())
-");
-$stmt->execute([
-    ':clinica_id' => $clinicaId,
-    ':paciente_id' => $paciente ? $paciente['id'] : null,
-    ':phone' => $sessionPhone,
-    ':message' => $message
-]);
-
-// Salva mensagem OUTGOING (da IA)
-$stmt = $db->prepare("
-    INSERT INTO whatsapp_messages 
-    (clinica_id, paciente_id, phone, direction, message, message_type, ai_processed, function_calls, tokens_used, created_at)
-    VALUES (:clinica_id, :paciente_id, :phone, 'outgoing', :message, 'text', 1, :function_calls, :tokens_used, NOW())
-");
-$stmt->execute([
-    ':clinica_id' => $clinicaId,
-    ':paciente_id' => $paciente ? $paciente['id'] : null,
-    ':phone' => $sessionPhone,
-    ':message' => $responseText,
-    ':function_calls' => json_encode($result['function_calls'] ?? null),
-    ':tokens_used' => $result['tokens_used'] ?? 0
-]);
-```
-
-### 2. Garantir Header X-Auth-Token no .htaccess
-
-Adicionar regra explícita para o X-Auth-Token:
-
-```apache
-# Pass X-Auth-Token header to PHP (fallback para Authorization)
-SetEnvIfNoCase X-Auth-Token "(.+)" HTTP_X_AUTH_TOKEN=$1
-RewriteCond %{HTTP:X-Auth-Token} .
-RewriteRule .* - [E=HTTP_X_AUTH_TOKEN:%{HTTP:X-Auth-Token}]
-```
-
-### 3. Melhorar Debug no Auth.php
-
-Mover o fallback do X-Auth-Token para **antes** do retorno null, e adicionar mais logs:
+**Arquivo**: `backend/api/config/Database.php`
 
 ```php
-// 5. FALLBACK: X-Auth-Token ANTES de retornar null
-$xAuthToken = $_SERVER['HTTP_X_AUTH_TOKEN'] ?? null;
+public function getConnection() {
+    $this->conn = null;
+    
+    // Define timezone do PHP para Brasília
+    date_default_timezone_set('America/Sao_Paulo');
 
-// Também tenta via getallheaders (case-insensitive)
-if (!$xAuthToken && function_exists('getallheaders')) {
-    $headers = getallheaders();
-    $debugLog[] = "--- Buscando X-Auth-Token em getallheaders ---";
-    foreach ($headers as $key => $value) {
-        $keyLower = strtolower($key);
-        if ($keyLower === 'x-auth-token') {
-            $xAuthToken = $value;
-            $debugLog[] = "FOUND X-Auth-Token via getallheaders!";
-            break;
-        }
+    try {
+        $this->conn = new PDO(
+            "mysql:host=" . $this->host . ";dbname=" . $this->db_name . ";charset=utf8mb4",
+            $this->username,
+            $this->password,
+            [
+                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+                PDO::ATTR_EMULATE_PREPARES => false
+            ]
+        );
+        
+        // Define timezone do MySQL para Brasília
+        $this->conn->exec("SET time_zone = '-03:00'");
+        
+    } catch(PDOException $exception) {
+        error_log("Connection error: " . $exception->getMessage());
+        throw new Exception("Erro de conexão com o banco de dados");
     }
-}
 
-if ($xAuthToken) {
-    file_put_contents($logFile, "TOKEN VIA X-Auth-Token: SIM (len=" . strlen($xAuthToken) . ")\n\n", FILE_APPEND);
-    return $xAuthToken;
+    return $this->conn;
 }
+```
+
+### 2. Ordenar Mensagens por ID (Garantido Sequencial)
+
+**Arquivo**: `backend/api/appointments/conversation.php`
+
+Alterar de:
+```php
+ORDER BY created_at ASC
+```
+
+Para:
+```php
+ORDER BY id ASC
+```
+
+O `id` é auto-increment e garante a ordem de inserção, enquanto `created_at` pode ter colisões quando duas mensagens são inseridas no mesmo segundo.
+
+### 3. Adicionar Timezone nos Scripts Principais
+
+**Arquivos**: `backend/api/services/OpenAIService.php` e `backend/api/ai/simulate-chat.php`
+
+Adicionar no início de cada arquivo (após os `require_once`):
+
+```php
+// Garante timezone de Brasília
+date_default_timezone_set('America/Sao_Paulo');
 ```
 
 ---
 
-## Diagrama do Fluxo Corrigido
+## Sobre a Escalabilidade
 
-```text
-SIMULADOR (frontend)
-    │
-    ▼ POST /api/ai/simulate-chat (com Authorization e X-Auth-Token)
-    │
-backend/api/ai/simulate-chat.php
-    │
-    ├── 1. Autentica via Tenant::getClinicId()
-    ├── 2. Processa mensagem com OpenAI
-    ├── 3. Atualiza whatsapp_sessions (contexto)
-    │
-    ├── 4. [NOVO] INSERT whatsapp_messages (incoming)  ← mensagem do usuário
-    └── 5. [NOVO] INSERT whatsapp_messages (outgoing)  ← resposta da IA
-    
-Agora ao clicar "Ver Conversa":
-    │
-    ▼ GET /api/appointments/{id}/conversation
-    │
-    └── SELECT FROM whatsapp_messages WHERE phone = session_phone
-        └── Retorna TODAS as mensagens (incoming + outgoing)
-```
+A estrutura atual (1 mensagem = 1 linha) é a forma correta. Alternativas como agrupar mensagens em JSON seriam piores para:
+- Busca por conteúdo
+- Ordenação
+- Paginação
+- Índices
+
+**Quando preocupar**: A partir de ~10M+ linhas, considerar particionamento por data ou arquivamento.
+
+**Otimizações futuras (não urgentes)**:
+1. Criar job de arquivamento mensal para mensagens antigas
+2. Limitar query do drawer a 100 mensagens mais recentes
+3. Adicionar índice `(clinica_id, phone, id)` para acelerar ainda mais
+
+---
+
+## Resumo das Correções
+
+| Problema | Causa | Solução |
+|----------|-------|---------|
+| Mensagens embaralhadas | Mesmo `created_at` para incoming/outgoing | Ordenar por `id ASC` |
+| IA ignora horário de funcionamento | Timezone do servidor = UTC | Configurar `America/Sao_Paulo` |
+| Banco 3h adiantado | MySQL usando UTC por padrão | `SET time_zone = '-03:00'` na conexão |
+| Escalabilidade | Preocupação prematura | Estrutura atual é correta; adicionar arquivamento futuro |
 
 ---
 
 ## Sequência de Validação
 
-1. **Após implementação**: Iniciar nova conversa no simulador
-2. **Verificar no banco**: `SELECT * FROM whatsapp_messages ORDER BY id DESC LIMIT 10`
-   - Deve ter mensagens `incoming` E `outgoing`
-3. **Agendar pelo simulador**: Seguir fluxo completo até confirmar
-4. **Verificar agendamento**: Conferir se `session_phone` foi preenchido em `agendamentos`
-5. **Testar "Ver Conversa"**: Clicar no agendamento → Ver Conversa
-   - Deve exibir o histórico completo
-
----
-
-## Sobre a Tabela `whatsapp_messages`
-
-A conversa fica gravada em:
-- **Tabela**: `whatsapp_messages`
-- **Campos principais**:
-  - `clinica_id`: ID da clínica
-  - `phone`: Identificador da sessão (ex: `S16_lk9z3f1a`)
-  - `direction`: `'incoming'` (usuário) ou `'outgoing'` (IA)
-  - `message`: Texto da mensagem
-  - `created_at`: Data/hora
-
-O vínculo com agendamento:
-- **Tabela**: `agendamentos`
-- **Campo**: `session_phone` → Link para `whatsapp_messages.phone`
-
----
-
-## Resumo
-
-| O que estava errado | O que será corrigido |
-|---------------------|---------------------|
-| Simulador não salva em `whatsapp_messages` | Adicionar 2 INSERTs (incoming + outgoing) |
-| X-Auth-Token pode não passar pelo .htaccess | Adicionar regra SetEnvIfNoCase |
-| "Ver Conversa" não mostra nada | Com mensagens salvas, vai funcionar |
+1. **Testar ordenação**: Abrir "Ver Conversa" e verificar se as mensagens estão na ordem correta
+2. **Testar timezone**: Verificar no banco se `created_at` agora grava no horário de Brasília
+3. **Testar IA + horário**: Configurar clínica para funcionar até 23:59 e testar agendamento às 21h
+4. **Verificar disponibilidade**: A IA deve retornar horários disponíveis para o dia atual
 
