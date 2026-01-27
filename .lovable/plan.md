@@ -1,102 +1,118 @@
 
-# Plano: Corrigir Nomes de Colunas nas Queries SQL do OpenAIService
+
+# Plano: Corrigir Erro "Método não permitido" no Simulador de Chat
 
 ## Problema Identificado
 
-O erro `SQLSTATE[42S22]: Column not found: 1054 Unknown column 'day_of_week'` ocorre porque as queries SQL no `OpenAIService.php` usam nomes de colunas incorretos que não correspondem ao schema real do banco de dados.
+O simulador de chat está retornando `{"success":false,"error":"Método não permitido"}` ao enviar mensagens POST.
 
----
+**Análise:**
+- O status HTTP é 200, mas a resposta contém erro
+- O ngrok da Evolution API está recebendo requisições (indicando possível conflito de rotas)
+- O endpoint `/api/ai/simulate-chat` está configurado corretamente no `index.php`
 
-## Análise das Diferenças
+## Causa Raiz
 
-### Tabela `horario_funcionamento`
-| Código atual (errado) | Schema real do banco |
-|-----------------------|---------------------|
-| `day_of_week` | `day` |
-| `open_time` | `open` |
-| `close_time` | `close` |
+Há um bug lógico no arquivo `simulate-chat.php`:
 
-### Tabela `bloqueios_agenda`
-| Código atual | Schema real |
-|--------------|-------------|
-| `day_of_week` ✅ | `day_of_week` (se tabela foi criada via v2.sql) |
-| `clinica_id` ✅ | `clinica_id` (adicionado via v4.sql) |
-
----
-
-## Correções Necessárias
-
-### Arquivo: `backend/api/services/OpenAIService.php`
-
-#### 1. Método `checkAvailability()` - Linhas 327-334
-
-**Código atual:**
 ```php
-$stmt = $this->db->prepare("
-    SELECT open_time, close_time 
-    FROM horario_funcionamento 
-    WHERE clinica_id = :clinica_id AND day_of_week = :day_of_week AND active = 1
-");
+// Linha 17-59: Bloco DELETE
+if ($method === 'DELETE') {
+    // ... código ...
+    Response::success(['cleared' => true]);
+    // FALTA: exit; aqui!
+}
+
+// Linha 62-64: Esta verificação é alcançada APÓS o bloco DELETE
+if ($method !== 'POST') {
+    Response::methodNotAllowed();  // <-- Problema!
+}
 ```
 
-**Código corrigido:**
+O problema é a **estrutura condicional**:
+1. Para requisições **DELETE**: O bloco executa e `Response::success()` tem `exit()`, então deveria parar
+2. Para requisições **POST**: Pula o bloco DELETE e passa pela verificação - deveria funcionar
+
+**Possível causa adicional:** O método DELETE pode estar falhando silenciosamente antes do `Response::success()`, fazendo o script continuar para a verificação `if ($method !== 'POST')`.
+
+## Solução
+
+### 1. Corrigir estrutura condicional no `simulate-chat.php`
+
+Reorganizar a lógica para usar `if-elseif` explícito e adicionar `exit;` após blocos que chamam Response:
+
 ```php
-$stmt = $this->db->prepare("
-    SELECT `open`, `close` 
-    FROM horario_funcionamento 
-    WHERE clinica_id = :clinica_id AND day = :day_of_week AND active = 1
-");
+$method = $_SERVER['REQUEST_METHOD'];
+
+// DELETE: Limpar sessão
+if ($method === 'DELETE') {
+    // ... código existente ...
+    Response::success(['cleared' => true]);
+    exit;  // Garantia extra
+}
+
+// POST: Processar mensagem
+if ($method === 'POST') {
+    // ... código existente do POST ...
+}
+
+// Qualquer outro método
+Response::methodNotAllowed();
 ```
 
-#### 2. Uso das colunas retornadas - Linhas 345-346
+### 2. Adicionar logs de debug temporários
 
-**Código atual:**
+Para identificar exatamente onde está falhando:
+
 ```php
-$startTime = strtotime($workingHours['open_time']);
-$endTime = strtotime($workingHours['close_time']);
+error_log("simulate-chat.php - Method: " . $_SERVER['REQUEST_METHOD']);
+error_log("simulate-chat.php - URI: " . $_SERVER['REQUEST_URI']);
 ```
-
-**Código corrigido:**
-```php
-$startTime = strtotime($workingHours['open']);
-$endTime = strtotime($workingHours['close']);
-```
-
-#### 3. Método `getWorkingHours()` - Verificar se também usa nomes errados
-
-Preciso verificar este método também pois é usado no system prompt.
-
----
 
 ## Arquivos a Modificar
 
 | Arquivo | Alteração |
 |---------|-----------|
-| `backend/api/services/OpenAIService.php` | Corrigir nomes de colunas SQL |
-
----
+| `backend/api/ai/simulate-chat.php` | Corrigir estrutura condicional, adicionar exit explícito |
 
 ## Detalhes Técnicos
 
-Linhas a modificar no `OpenAIService.php`:
+### Mudança na estrutura do arquivo:
 
-1. **Linha ~328-331**: Query de horário de funcionamento
-   - `open_time` → `open`
-   - `close_time` → `close`
-   - `day_of_week` → `day`
+**Antes:**
+```php
+if ($method === 'DELETE') {
+    // código DELETE
+    Response::success();
+}
 
-2. **Linha ~345-346**: Acesso aos campos retornados
-   - `$workingHours['open_time']` → `$workingHours['open']`
-   - `$workingHours['close_time']` → `$workingHours['close']`
+if ($method !== 'POST') {
+    Response::methodNotAllowed();
+}
 
-3. **Método `getWorkingHours()`** (se existir): Mesmas correções
+// código POST
+```
 
----
+**Depois:**
+```php
+if ($method === 'DELETE') {
+    // código DELETE
+    Response::success();
+    exit;
+}
 
-## Validação
+if ($method !== 'POST') {
+    Response::methodNotAllowed();
+    exit;
+}
 
-Após aplicar as correções:
-1. Acessar a página de WhatsApp
-2. Enviar uma mensagem no simulador (ex: "Quero agendar uma consulta")
-3. A IA deve responder normalmente sem erro SQL
-4. Testar fluxo de agendamento completo
+// código POST
+```
+
+## Teste de Validação
+
+1. Acessar a página WhatsApp Config
+2. Enviar uma mensagem no simulador (ex: "oi")
+3. Verificar se a resposta da IA aparece sem erro
+4. Testar o botão "Limpar" para verificar se DELETE funciona
+
