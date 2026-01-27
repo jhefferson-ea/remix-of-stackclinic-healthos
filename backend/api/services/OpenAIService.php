@@ -326,9 +326,9 @@ PROMPT;
         
         // Busca horário de funcionamento do dia
         $stmt = $this->db->prepare("
-            SELECT open_time, close_time 
+            SELECT `open`, `close` 
             FROM horario_funcionamento 
-            WHERE clinica_id = :clinica_id AND day_of_week = :day_of_week AND active = 1
+            WHERE clinica_id = :clinica_id AND day = :day_of_week AND active = 1
         ");
         $stmt->execute([':clinica_id' => $clinicaId, ':day_of_week' => $dayOfWeek]);
         $workingHours = $stmt->fetch();
@@ -342,8 +342,8 @@ PROMPT;
         
         // Gera slots disponíveis (a cada 30 minutos)
         $availableSlots = [];
-        $startTime = strtotime($workingHours['open_time']);
-        $endTime = strtotime($workingHours['close_time']);
+        $startTime = strtotime($workingHours['open']);
+        $endTime = strtotime($workingHours['close']);
         
         while ($startTime < $endTime) {
             $timeStr = date('H:i', $startTime);
@@ -518,10 +518,10 @@ PROMPT;
         $days = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado'];
         
         $stmt = $this->db->prepare("
-            SELECT day_of_week, open_time, close_time, active 
+            SELECT day, `open`, `close`, active 
             FROM horario_funcionamento 
             WHERE clinica_id = :clinica_id
-            ORDER BY day_of_week
+            ORDER BY day
         ");
         $stmt->execute([':clinica_id' => $this->clinica['id']]);
         $hours = $stmt->fetchAll();
@@ -529,9 +529,9 @@ PROMPT;
         $formatted = '';
         foreach ($hours as $h) {
             if ($h['active']) {
-                $formatted .= $days[$h['day_of_week']] . ': ' . 
-                    substr($h['open_time'], 0, 5) . ' às ' . 
-                    substr($h['close_time'], 0, 5) . "\n";
+                $formatted .= $days[$h['day']] . ': ' . 
+                    substr($h['open'], 0, 5) . ' às ' . 
+                    substr($h['close'], 0, 5) . "\n";
             }
         }
         
