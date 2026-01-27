@@ -122,7 +122,9 @@ foreach ($routes as $route => $file) {
 }
 
 // Dynamic routes with regex
-if (preg_match('/\/api\/appointments\/(\d+)/', $uri)) {
+if (preg_match('/\/api\/appointments\/(\d+)\/conversation/', $uri)) {
+    require_once __DIR__ . '/appointments/conversation.php';
+} elseif (preg_match('/\/api\/appointments\/(\d+)/', $uri)) {
     require_once __DIR__ . '/appointments/detail.php';
 } elseif (preg_match('/\/api\/patients\/(\d+)\/gallery\/upload/', $uri)) {
     require_once __DIR__ . '/patients/gallery-upload.php';

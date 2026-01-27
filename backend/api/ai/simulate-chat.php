@@ -206,6 +206,9 @@ try {
     try {
         $openai = new OpenAIService($db, $clinica, $paciente);
         
+        // Define session_phone para vincular agendamentos às conversas
+        $openai->setSessionPhone($sessionPhone);
+        
         // Extrai dados automaticamente da mensagem do usuário
         $extractedData = $openai->extractDataFromMessage($message, $collectedData);
         

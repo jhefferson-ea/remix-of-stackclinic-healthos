@@ -17,7 +17,8 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
-import { Loader2, Trash2, User, Clock, FileText, Calendar } from 'lucide-react';
+import { Loader2, Trash2, User, Clock, FileText, Calendar, MessageSquare } from 'lucide-react';
+import { ConversationDrawer } from './ConversationDrawer';
 import { api, type Appointment } from '@/services/api';
 import { toast } from '@/hooks/use-toast';
 import { format, parseISO } from 'date-fns';
@@ -38,6 +39,7 @@ export function AppointmentDetailModal({
 }: AppointmentDetailModalProps) {
   const [isDeleting, setIsDeleting] = useState(false);
   const [showConfirmDelete, setShowConfirmDelete] = useState(false);
+  const [showConversation, setShowConversation] = useState(false);
 
   const handleDelete = async () => {
     if (!appointment) return;
@@ -136,6 +138,14 @@ export function AppointmentDetailModal({
               Fechar
             </Button>
             <Button
+              variant="outline"
+              onClick={() => setShowConversation(true)}
+              className="flex-1"
+            >
+              <MessageSquare className="h-4 w-4 mr-2" />
+              Ver Conversa
+            </Button>
+            <Button
               variant="destructive"
               onClick={() => setShowConfirmDelete(true)}
               disabled={isDeleting}
@@ -175,6 +185,12 @@ export function AppointmentDetailModal({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <ConversationDrawer
+        open={showConversation}
+        onOpenChange={setShowConversation}
+        appointmentId={appointment.id}
+      />
     </>
   );
 }

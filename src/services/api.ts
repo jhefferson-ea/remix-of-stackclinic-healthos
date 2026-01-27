@@ -283,6 +283,14 @@ class ApiService {
     });
   }
 
+  async getAppointmentConversation(appointmentId: number) {
+    return this.request<{
+      messages: Array<{ direction: string; message: string; created_at: string }>;
+      has_conversation: boolean;
+      message?: string;
+    }>(`/appointments/${appointmentId}/conversation`);
+  }
+
   async approveAiSlot(suggestionId: number) {
     return this.request<{ success: boolean }>('/ai/approve-slot', {
       method: 'POST',
