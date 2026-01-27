@@ -1,435 +1,178 @@
 
-# Plano: Coleta de Telefone + Validação de Paciente + Visualização de Conversa
 
-## Resumo do que será implementado
+# Plano: Correção do Modal de Detalhes e Visualização de Conversa
 
-1. **IA pedir telefone do paciente** antes de confirmar agendamento
-2. **Validar se paciente já existe** pelo telefone no banco de dados
-3. **Associar agendamento a paciente existente** se encontrado
-4. **Mostrar botão "Ver conversa"** no modal de detalhes do agendamento
-5. **Criar modal/drawer** para exibir o histórico da conversa
+## Problemas Identificados
 
----
+### Problema 1: Erro "Token não fornecido" no endpoint de conversa
+O endpoint `/api/appointments/{id}/conversation` está chamando `Tenant::getClinicId()`, que por sua vez chama `Auth::requireAuth()`. Esta função **exige autenticação** e retorna erro "Token não fornecido" se não encontrar o header Authorization.
 
-## Arquitetura Atual (Diagnóstico)
+**Causa raiz**: O endpoint está funcionando corretamente do ponto de vista de código - o problema é que provavelmente o token **não está sendo enviado** na requisição, ou o endpoint não está recebendo o header corretamente.
 
-### Fluxo de Dados Atual
-```text
-collected_data = {
-    procedure: null,
-    date: null,
-    time: null,
-    patient_name: null,
-    patient_phone: null  // <-- Existe mas NÃO é pedido pela IA
+Olhando o `api.ts`, o método `getAppointmentConversation` usa o método genérico `request<T>()` que **inclui o token** automaticamente na linha 34-36:
+```typescript
+const token = localStorage.getItem('stackclinic_token');
+if (token) {
+  defaultHeaders['Authorization'] = `Bearer ${token}`;
 }
 ```
 
-### Problemas Identificados
-1. O `patient_phone` existe no estado mas a IA **não o pede** (não está no prompt)
-2. O `createAppointment` aceita telefone mas é **opcional** (linha 529 do OpenAIService)
-3. Não há validação de paciente existente antes de criar um novo
-4. Não há vínculo entre `agendamentos` e `whatsapp_messages` (falta coluna para associar)
-5. O modal `AppointmentDetailModal` não tem botão para ver conversa
+O problema pode ser que o token não está no localStorage naquele momento, ou há um problema no backend com a extração do header.
+
+### Problema 2: Warning de Acessibilidade (aria-describedby)
+O Radix UI Dialog exige um `DialogDescription` para acessibilidade. O `AppointmentDetailModal` tem `DialogHeader` e `DialogTitle`, mas **não tem `DialogDescription`**.
+
+### Problema 3: Layout "bugado" do modal
+Olhando o screenshot, o layout parece funcional mas pode ser melhorado:
+- Os cards de Data e Horário estão muito apertados na grid
+- O texto da data está muito longo ("Quarta-Feira, 28 De Janeiro De 2026")
 
 ---
 
-## Mudanças Planejadas
-
-### Arquivos a Modificar
+## Arquivos a Modificar
 
 | Arquivo | Tipo | Alteração |
 |---------|------|-----------|
-| `backend/api/services/OpenAIService.php` | Backend | Adicionar passo "phone" no fluxo, validar paciente existente |
-| `backend/api/ai/simulate-chat.php` | Backend | Passar session_phone para o service |
-| `backend/database-update-v7.sql` | SQL | Adicionar coluna `session_phone` na tabela `agendamentos` |
-| `backend/api/appointments/conversation.php` | Backend (novo) | Endpoint para buscar mensagens de um agendamento |
-| `src/components/agenda/AppointmentDetailModal.tsx` | Frontend | Adicionar botão "Ver conversa" |
-| `src/components/agenda/ConversationDrawer.tsx` | Frontend (novo) | Componente para exibir histórico |
-| `src/services/api.ts` | Frontend | Adicionar método `getAppointmentConversation` |
+| `src/components/agenda/AppointmentDetailModal.tsx` | Frontend | Adicionar DialogDescription, ajustar layout |
+| `src/components/agenda/ConversationDrawer.tsx` | Frontend | Adicionar SheetDescription para resolver warning |
+| `backend/api/appointments/conversation.php` | Backend | Adicionar logs para debug |
 
 ---
 
-## Detalhes Técnicos
+## Mudanças Técnicas
 
-### 1. Adicionar Passo "phone" no Fluxo da IA
+### 1. Adicionar DialogDescription no Modal de Detalhes
 
-**Arquivo:** `backend/api/services/OpenAIService.php`
-
-Atualizar a função `determineCurrentStep()` para incluir telefone:
-
-```php
-public function determineCurrentStep($collectedData) {
-    if (!empty($collectedData['patient_name']) && 
-        !empty($collectedData['patient_phone']) &&  // NOVO
-        !empty($collectedData['date']) && 
-        !empty($collectedData['time']) && 
-        !empty($collectedData['procedure'])) {
-        return 'confirm';
-    }
-    if (!empty($collectedData['patient_name'])) {
-        return 'phone';  // NOVO PASSO
-    }
-    if (!empty($collectedData['time'])) {
-        return 'name';
-    }
-    // ... resto igual
-}
-```
-
-Atualizar `getNextStepInstruction()`:
-
-```php
-private function getNextStepInstruction($collectedData) {
-    // ... passos anteriores ...
-    if (empty($collectedData['patient_name'])) {
-        return "Pergunte o nome completo do paciente.";
-    }
-    if (empty($collectedData['patient_phone'])) {
-        return "Pergunte o número de telefone para contato (com DDD).";
-    }
-    return "TODOS OS DADOS COLETADOS! Use createAppointment...";
-}
-```
-
-Atualizar o prompt para exibir status do telefone:
-
-```php
-$phoneStatus = $collectedData['patient_phone'] 
-    ? "✅ {$collectedData['patient_phone']}" 
-    : '❌ NÃO INFORMADO';
-```
-
-### 2. Validar Paciente Existente pelo Telefone
-
-**Arquivo:** `backend/api/services/OpenAIService.php` (função `createAppointment`)
-
-```php
-private function createAppointment($date, $time, $procedureName, $patientName, $patientPhone, $clinicaId, $sessionPhone = null) {
-    // ... validações ...
-    
-    // NOVO: Busca paciente existente pelo telefone
-    $existingPatient = null;
-    if ($patientPhone) {
-        $stmt = $this->db->prepare("
-            SELECT id, name, phone FROM pacientes 
-            WHERE clinica_id = :clinica_id AND phone = :phone
-            LIMIT 1
-        ");
-        $stmt->execute([':clinica_id' => $clinicaId, ':phone' => $patientPhone]);
-        $existingPatient = $stmt->fetch();
-    }
-    
-    if ($existingPatient) {
-        // Usa paciente existente
-        $this->paciente = $existingPatient;
-        error_log("Paciente EXISTENTE encontrado: ID {$existingPatient['id']}");
-    } elseif (!$this->paciente) {
-        // Cria novo paciente (código atual)
-        // ...
-    }
-    
-    // Cria agendamento COM session_phone para vincular conversa
-    $stmt = $this->db->prepare("
-        INSERT INTO agendamentos (..., session_phone)
-        VALUES (..., :session_phone)
-    ");
-}
-```
-
-### 3. Adicionar Coluna na Tabela agendamentos
-
-**Novo arquivo:** `backend/database-update-v7.sql`
-
-```sql
--- Vincula agendamento à sessão de conversa WhatsApp
-ALTER TABLE agendamentos
-ADD COLUMN IF NOT EXISTS session_phone VARCHAR(20) NULL 
-    COMMENT 'Telefone/ID da sessão WhatsApp que originou o agendamento'
-    AFTER notes;
-
--- Índice para buscar agendamentos por sessão
-CREATE INDEX IF NOT EXISTS idx_agendamento_session 
-ON agendamentos(session_phone);
-```
-
-### 4. Endpoint para Buscar Conversa do Agendamento
-
-**Novo arquivo:** `backend/api/appointments/conversation.php`
-
-```php
-<?php
-// GET /api/appointments/{id}/conversation
-// Retorna mensagens da sessão que originou o agendamento
-
-require_once __DIR__ . '/../config/cors.php';
-require_once __DIR__ . '/../config/Database.php';
-require_once __DIR__ . '/../helpers/Response.php';
-require_once __DIR__ . '/../helpers/Tenant.php';
-
-$clinicaId = Tenant::getClinicId();
-
-// Extrai ID do agendamento da URL
-preg_match('/\/appointments\/(\d+)\/conversation/', $_SERVER['REQUEST_URI'], $matches);
-$appointmentId = $matches[1] ?? null;
-
-if (!$appointmentId) {
-    Response::badRequest('ID do agendamento não informado');
-}
-
-try {
-    $database = new Database();
-    $db = $database->getConnection();
-    
-    // Busca session_phone do agendamento
-    $stmt = $db->prepare("
-        SELECT session_phone FROM agendamentos 
-        WHERE id = :id AND clinica_id = :clinica_id
-    ");
-    $stmt->execute([':id' => $appointmentId, ':clinica_id' => $clinicaId]);
-    $appointment = $stmt->fetch();
-    
-    if (!$appointment || !$appointment['session_phone']) {
-        Response::success([
-            'messages' => [],
-            'message' => 'Este agendamento não possui conversa registrada'
-        ]);
-        exit;
-    }
-    
-    // Busca mensagens da sessão
-    $stmt = $db->prepare("
-        SELECT direction, message, created_at 
-        FROM whatsapp_messages 
-        WHERE clinica_id = :clinica_id AND phone = :phone
-        ORDER BY created_at ASC
-    ");
-    $stmt->execute([
-        ':clinica_id' => $clinicaId, 
-        ':phone' => $appointment['session_phone']
-    ]);
-    $messages = $stmt->fetchAll();
-    
-    Response::success(['messages' => $messages]);
-    
-} catch (Exception $e) {
-    Response::serverError('Erro ao buscar conversa');
-}
-```
-
-### 5. Atualizar Modal de Detalhes do Agendamento
-
-**Arquivo:** `src/components/agenda/AppointmentDetailModal.tsx`
-
-Adicionar botão "Ver Conversa" e estado para o drawer:
+O warning do Radix UI pede um `Description` para acessibilidade. Vamos adicionar um `DialogDescription` visualmente oculto:
 
 ```tsx
-import { MessageSquare } from 'lucide-react';
-import { ConversationDrawer } from './ConversationDrawer';
+import { DialogDescription } from '@/components/ui/dialog';
 
-// Dentro do componente:
-const [showConversation, setShowConversation] = useState(false);
-
-// No JSX, adicionar botão antes do "Cancelar Agendamento":
-<Button
-  variant="outline"
-  onClick={() => setShowConversation(true)}
-  className="flex-1"
->
-  <MessageSquare className="h-4 w-4 mr-2" />
-  Ver Conversa
-</Button>
-
-// E o drawer:
-<ConversationDrawer
-  open={showConversation}
-  onOpenChange={setShowConversation}
-  appointmentId={appointment.id}
-/>
+// No DialogHeader, após DialogTitle:
+<DialogHeader>
+  <DialogTitle>Detalhes do Agendamento</DialogTitle>
+  <DialogDescription className="sr-only">
+    Informações completas sobre o agendamento selecionado
+  </DialogDescription>
+</DialogHeader>
 ```
 
-### 6. Criar Componente ConversationDrawer
+### 2. Adicionar SheetDescription no Drawer de Conversa
 
-**Novo arquivo:** `src/components/agenda/ConversationDrawer.tsx`
+O mesmo problema ocorre no Sheet (que usa DialogPrimitive internamente):
 
 ```tsx
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
-import { ScrollArea } from '@/components/ui/scroll-area';
-import { useEffect, useState } from 'react';
-import { api } from '@/services/api';
-import { Loader2, User, Bot } from 'lucide-react';
-import { cn } from '@/lib/utils';
-import { format } from 'date-fns';
+import { SheetDescription } from '@/components/ui/sheet';
 
-interface Message {
-  direction: 'incoming' | 'outgoing';
-  message: string;
-  created_at: string;
-}
-
-interface ConversationDrawerProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  appointmentId: number;
-}
-
-export function ConversationDrawer({ open, onOpenChange, appointmentId }: ConversationDrawerProps) {
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (open && appointmentId) {
-      loadConversation();
-    }
-  }, [open, appointmentId]);
-
-  const loadConversation = async () => {
-    setIsLoading(true);
-    setError(null);
-    const res = await api.getAppointmentConversation(appointmentId);
-    if (res.success && res.data) {
-      setMessages(res.data.messages || []);
-      if (res.data.messages.length === 0) {
-        setError('Este agendamento não possui conversa registrada.');
-      }
-    } else {
-      setError(res.error || 'Erro ao carregar conversa');
-    }
-    setIsLoading(false);
-  };
-
-  return (
-    <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent className="w-[400px] sm:w-[500px]">
-        <SheetHeader>
-          <SheetTitle>Conversa do Agendamento</SheetTitle>
-        </SheetHeader>
-        
-        <ScrollArea className="h-[calc(100vh-120px)] mt-4">
-          {isLoading ? (
-            <div className="flex justify-center py-8">
-              <Loader2 className="h-6 w-6 animate-spin" />
-            </div>
-          ) : error ? (
-            <p className="text-center text-muted-foreground py-8">{error}</p>
-          ) : (
-            <div className="space-y-3 pr-4">
-              {messages.map((msg, idx) => (
-                <div
-                  key={idx}
-                  className={cn(
-                    'flex gap-2',
-                    msg.direction === 'outgoing' ? 'justify-end' : 'justify-start'
-                  )}
-                >
-                  {msg.direction === 'incoming' && (
-                    <div className="h-8 w-8 rounded-full bg-muted flex items-center justify-center">
-                      <User className="h-4 w-4" />
-                    </div>
-                  )}
-                  <div
-                    className={cn(
-                      'max-w-[80%] rounded-lg px-3 py-2 text-sm',
-                      msg.direction === 'outgoing'
-                        ? 'bg-primary text-primary-foreground'
-                        : 'bg-muted'
-                    )}
-                  >
-                    <p>{msg.message}</p>
-                    <p className="text-[10px] opacity-60 mt-1">
-                      {format(new Date(msg.created_at), 'HH:mm')}
-                    </p>
-                  </div>
-                  {msg.direction === 'outgoing' && (
-                    <div className="h-8 w-8 rounded-full bg-primary/10 flex items-center justify-center">
-                      <Bot className="h-4 w-4 text-primary" />
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </ScrollArea>
-      </SheetContent>
-    </Sheet>
-  );
-}
+// No SheetHeader, após SheetTitle:
+<SheetHeader>
+  <SheetTitle>Conversa do Agendamento</SheetTitle>
+  <SheetDescription className="sr-only">
+    Histórico de mensagens da conversa que originou este agendamento
+  </SheetDescription>
+</SheetHeader>
 ```
 
-### 7. Adicionar Método na API do Frontend
+### 3. Melhorar Layout do Modal
 
-**Arquivo:** `src/services/api.ts`
+Ajustar o grid para ser mais responsivo e formatar a data de forma mais compacta:
 
-```typescript
-async getAppointmentConversation(appointmentId: number) {
-  return this.request<{ 
-    messages: Array<{ direction: string; message: string; created_at: string }> 
-  }>(`/appointments/${appointmentId}/conversation`);
-}
+```tsx
+// Mudar format da data para versão mais curta
+const formattedDate = format(parseISO(appointment.date), "EEE, dd/MM/yyyy", { locale: ptBR });
+
+// Ajustar grid para flex em mobile
+<div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+```
+
+### 4. Debug do Endpoint de Conversa
+
+Adicionar logs no `conversation.php` para identificar se o token está chegando:
+
+```php
+// No início do arquivo, após cors.php
+$debugLog = __DIR__ . '/../debug.log';
+file_put_contents($debugLog, "\n=== CONVERSATION DEBUG ===\n", FILE_APPEND);
+file_put_contents($debugLog, "URI: " . $_SERVER['REQUEST_URI'] . "\n", FILE_APPEND);
+file_put_contents($debugLog, "Authorization present: " . (isset($_SERVER['HTTP_AUTHORIZATION']) ? 'SIM' : 'NAO') . "\n", FILE_APPEND);
 ```
 
 ---
 
-## Fluxo de Conversa Atualizado
+## Resumo das Correções
 
-```text
-Cliente: "oi"
-→ IA: "Olá! Como posso ajudar?"
+| Problema | Solução |
+|----------|---------|
+| Warning aria-describedby | Adicionar `DialogDescription` e `SheetDescription` com `sr-only` |
+| Layout apertado | Ajustar grid para `grid-cols-1 sm:grid-cols-2` |
+| Data muito longa | Usar formato curto: "Qua, 28/01/2026" |
+| Token não fornecido | Adicionar logs no backend para debug, verificar se token está no localStorage |
 
-Cliente: "quero marcar consulta"
-→ collected_data = { procedure: "Consulta" }
-→ IA: "Para qual data prefere?"
+---
 
-Cliente: "amanhã 10h"
-→ collected_data = { procedure: "Consulta", date: "2026-01-28", time: "10:00" }
-→ IA: "Para finalizar, qual seu nome completo?"
+## Código das Correções
 
-Cliente: "João Silva"
-→ collected_data = { ..., patient_name: "João Silva" }
-→ IA: "E qual seu telefone para contato (com DDD)?"  <-- NOVO
+### AppointmentDetailModal.tsx - Alterações
 
-Cliente: "11999887766"
-→ collected_data = { ..., patient_phone: "11999887766" }
-→ Backend verifica: SELECT * FROM pacientes WHERE phone = '11999887766'
-→ Se encontrar: usa paciente existente
-→ Se não: cria novo paciente
-→ Cria agendamento com session_phone vinculado
-→ IA: "Pronto! Consulta agendada para 28/01 às 10:00 para João Silva."
+1. Importar `DialogDescription`:
+```tsx
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription, // ADICIONAR
+  DialogFooter,
+} from '@/components/ui/dialog';
+```
+
+2. Adicionar description no header:
+```tsx
+<DialogHeader>
+  <DialogTitle>Detalhes do Agendamento</DialogTitle>
+  <DialogDescription className="sr-only">
+    Informações completas sobre o agendamento selecionado
+  </DialogDescription>
+</DialogHeader>
+```
+
+3. Ajustar formato da data:
+```tsx
+const formattedDate = format(parseISO(appointment.date), "EEE, dd/MM/yyyy", { locale: ptBR });
+```
+
+4. Ajustar grid para responsivo:
+```tsx
+<div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+```
+
+### ConversationDrawer.tsx - Alterações
+
+1. Importar `SheetDescription`:
+```tsx
+import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from '@/components/ui/sheet';
+```
+
+2. Adicionar description:
+```tsx
+<SheetHeader>
+  <SheetTitle>Conversa do Agendamento</SheetTitle>
+  <SheetDescription className="sr-only">
+    Histórico de mensagens da conversa que originou este agendamento
+  </SheetDescription>
+</SheetHeader>
 ```
 
 ---
 
-## Resumo das Mudanças
+## Teste de Validação
 
-| Mudança | Impacto |
-|---------|---------|
-| Novo passo "phone" no fluxo | IA pede telefone antes de confirmar |
-| Validação de paciente existente | Evita duplicatas, associa corretamente |
-| Coluna `session_phone` em agendamentos | Vincula agendamento à conversa |
-| Endpoint `/appointments/{id}/conversation` | API para buscar mensagens |
-| Botão "Ver Conversa" no modal | UX para profissional ver histórico |
-| Componente ConversationDrawer | Exibe mensagens em formato chat |
+1. Abrir a agenda e clicar em um agendamento
+2. Verificar que o modal abre sem warnings no console
+3. Verificar que o layout está melhor (data mais curta, grid responsivo)
+4. Clicar em "Ver Conversa"
+5. Se ainda mostrar "Token não fornecido", verificar:
+   - No DevTools → Application → Local Storage → `stackclinic_token`
+   - No DevTools → Network → Request Headers → Authorization
+6. Se o token existir mas não estiver chegando no backend, o problema está no .htaccess ou configuração do servidor
 
----
-
-## Ordem de Implementação
-
-1. Criar `backend/database-update-v7.sql` (migração)
-2. Atualizar `OpenAIService.php` (fluxo + validação)
-3. Atualizar `simulate-chat.php` (passar session_phone)
-4. Criar `appointments/conversation.php` (endpoint)
-5. Atualizar `api.ts` (método frontend)
-6. Criar `ConversationDrawer.tsx` (componente)
-7. Atualizar `AppointmentDetailModal.tsx` (botão + drawer)
-
----
-
-## Testes de Validação
-
-1. Iniciar conversa no simulador
-2. Passar pelo fluxo: procedimento → data → horário → nome → **telefone**
-3. Verificar se agendamento foi criado com `session_phone`
-4. Na agenda, clicar no agendamento
-5. Clicar em "Ver Conversa"
-6. Verificar se o histórico da conversa aparece corretamente
-7. Testar com telefone de paciente já existente (deve associar, não criar novo)
