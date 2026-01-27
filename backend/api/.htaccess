@@ -2,7 +2,7 @@
 # Coloque este arquivo em: public_html/api/.htaccess
 
 # Evolution API Config - ATUALIZE A URL DO NGROK QUANDO MUDAR
-SetEnv EVOLUTION_API_URL "https://b59ebe4aa6a0.ngrok-free.app"
+SetEnv EVOLUTION_API_URL "https://d0992063157d.ngrok-free.app"
 SetEnv EVOLUTION_API_KEY "stackclinic123"
 
 # CORS Headers - MUST be first
