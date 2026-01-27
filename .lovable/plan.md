@@ -1,171 +1,335 @@
 
 
-# Plano: Correção de Ordenação, Timezone e Otimização do Banco
+# Plano: Suporte a Múltiplos Profissionais (Médicos)
 
-## Problemas Identificados
+## Contexto Atual
 
-### 1. Mensagens em Ordem Errada no Drawer
-**Diagnóstico**: O endpoint `conversation.php` ordena por `ORDER BY created_at ASC`, que deveria funcionar. Porém, o problema é que as mensagens estão sendo inseridas com timestamps errados devido a:
-- O `simulate-chat.php` usa `NOW()` para ambas as mensagens (incoming e outgoing), que são inseridas no mesmo segundo
-- Como `incoming` e `outgoing` têm o mesmo timestamp, a ordem fica indeterminada
+Analisando o código, identifiquei que:
 
-**Solução**: Adicionar `ORDER BY id ASC` (que é sequencial e garantido) em vez de `created_at`.
+1. **Tabela `usuarios`** já tem campos para médicos (`role`, `specialty`, `crm`)
+2. **Tabela `agendamentos`** NÃO tem coluna `usuario_id` (profissional responsável)
+3. **Tabela `bloqueios_agenda`** NÃO tem coluna `usuario_id` (bloqueio por médico)
+4. **Tabela `horario_funcionamento`** é por clínica, não por profissional
+5. **Tabela `procedimentos`** NÃO tem vínculo com profissionais que podem executá-los
+6. **A IA** não pergunta qual médico o paciente prefere
+7. **O Financeiro** não filtra por profissional
 
-### 2. IA Não Respeita Horário de Funcionamento
-**Diagnóstico**: A função `checkAvailability()` (linhas 713-800) consulta corretamente `horario_funcionamento`:
+---
+
+## Visão Geral da Solução
+
+A solução envolve criar relacionamentos entre:
+- **Profissionais** (tabela `usuarios` onde `role = 'doctor'`)
+- **Procedimentos** (quais profissionais fazem quais procedimentos)
+- **Agendamentos** (qual profissional atenderá)
+- **Horários** (cada profissional pode ter horários diferentes)
+- **Bloqueios** (férias/folgas individuais)
+
+---
+
+## Mudanças no Banco de Dados
+
+### 1. Nova tabela: `profissional_procedimentos` (N:N)
+Vincula quais profissionais executam quais procedimentos:
+
+```sql
+CREATE TABLE profissional_procedimentos (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    usuario_id INT NOT NULL,
+    procedimento_id INT NOT NULL,
+    clinica_id INT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY (usuario_id, procedimento_id),
+    FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE,
+    FOREIGN KEY (procedimento_id) REFERENCES procedimentos(id) ON DELETE CASCADE,
+    FOREIGN KEY (clinica_id) REFERENCES clinica(id)
+);
+```
+
+### 2. Nova tabela: `horario_profissional` (horário individual)
+Cada profissional pode ter seu próprio horário:
+
+```sql
+CREATE TABLE horario_profissional (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    usuario_id INT NOT NULL,
+    clinica_id INT NOT NULL,
+    day INT NOT NULL,  -- 0=Domingo, 1=Segunda, ...
+    open TIME NOT NULL,
+    close TIME NOT NULL,
+    active BOOLEAN DEFAULT TRUE,
+    UNIQUE KEY (usuario_id, day),
+    FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE,
+    FOREIGN KEY (clinica_id) REFERENCES clinica(id)
+);
+```
+
+### 3. Adicionar `usuario_id` em tabelas existentes
+
+```sql
+-- Agendamentos: qual profissional atenderá
+ALTER TABLE agendamentos ADD COLUMN usuario_id INT NULL;
+ALTER TABLE agendamentos ADD FOREIGN KEY (usuario_id) REFERENCES usuarios(id);
+
+-- Bloqueios: bloqueio individual ou geral
+ALTER TABLE bloqueios_agenda ADD COLUMN usuario_id INT NULL;
+ALTER TABLE bloqueios_agenda ADD FOREIGN KEY (usuario_id) REFERENCES usuarios(id);
+
+-- Pagamentos: qual profissional realizou
+ALTER TABLE pagamentos_procedimentos ADD COLUMN usuario_id INT NULL;
+ALTER TABLE pagamentos_procedimentos ADD FOREIGN KEY (usuario_id) REFERENCES usuarios(id);
+```
+
+---
+
+## Lógica de Seleção de Profissional
+
+### Fluxo via WhatsApp/IA:
+
+1. **Paciente escolhe procedimento** → IA consulta `profissional_procedimentos` para ver quais profissionais fazem esse procedimento
+
+2. **Se apenas 1 profissional** → Usa automaticamente
+
+3. **Se múltiplos profissionais**:
+   - Pergunta: "Você tem preferência por algum profissional? Temos: Dr. João, Dra. Maria"
+   - Se paciente escolhe → Usa o escolhido
+   - Se paciente diz "qualquer um" / "tanto faz" → Usa algoritmo de balanceamento
+
+4. **Algoritmo de balanceamento** (quando paciente não escolhe):
+   - Busca profissional com MENOS agendamentos naquela data
+   - Em caso de empate, usa o primeiro disponível no horário solicitado
+
+---
+
+## Mudanças na Agenda (Frontend)
+
+### 1. Filtro por Profissional
+Adicionar dropdown no header da agenda:
+
+```text
+[▼ Todos os Profissionais] [▼ Dr. João] [▼ Dra. Maria]
+```
+
+### 2. Cores por Profissional
+Cada profissional terá uma cor associada para identificação visual rápida:
+
+```typescript
+// Exemplo de mapeamento
+const professionalColors = {
+  1: 'bg-blue-500/20 border-blue-500',   // Dr. João
+  2: 'bg-green-500/20 border-green-500', // Dra. Maria
+  3: 'bg-purple-500/20 border-purple-500', // Dr. Carlos
+};
+```
+
+### 3. Visualização em Colunas (opcional futuro)
+Modo "lado a lado" mostrando cada profissional em uma coluna separada.
+
+---
+
+## Mudanças no Financeiro
+
+### 1. Filtro por Profissional
+Adicionar dropdown similar ao da agenda para filtrar:
+- Receita por profissional
+- Procedimentos por profissional
+- Pagamentos pendentes por profissional
+
+### 2. KPIs por Profissional
+- "Receita do Dr. João este mês: R$ X"
+- "Procedimentos realizados pela Dra. Maria: Y"
+
+---
+
+## Mudanças na Configuração
+
+### 1. Gestão de Equipe (TeamManagement)
+Adicionar na tela de configuração de cada membro:
+- **Procedimentos que executa** (checkboxes)
+- **Horário individual** (se diferente do horário da clínica)
+- **Cor na agenda** (para identificação visual)
+
+### 2. Configuração de Procedimentos
+Ao criar/editar procedimento, adicionar:
+- **Profissionais habilitados** (multi-select)
+
+---
+
+## Mudanças no Backend (API)
+
+### Endpoints novos:
+
+| Endpoint | Método | Descrição |
+|----------|--------|-----------|
+| `/api/team/{id}/procedures` | GET/POST | Procedimentos do profissional |
+| `/api/team/{id}/schedule` | GET/POST | Horário individual |
+| `/api/procedures/{id}/professionals` | GET/POST | Profissionais habilitados |
+
+### Endpoints modificados:
+
+| Endpoint | Modificação |
+|----------|-------------|
+| `/api/appointments` | Aceita/retorna `usuario_id`, filtro por profissional |
+| `/api/appointments/block` | Aceita `usuario_id` para bloqueio individual |
+| `/api/finance/procedure-payments` | Filtro por `usuario_id` |
+| `/api/finance/summary` | Filtro por profissional |
+
+---
+
+## Mudanças no OpenAIService (IA)
+
+### 1. Novo passo no fluxo de agendamento:
+
+```text
+ATUAL:
+1. Procedimento → 2. Data → 3. Horário → 4. Nome → 5. Telefone → 6. Confirmação
+
+NOVO:
+1. Procedimento → 2. Profissional (se múltiplos) → 3. Data → 4. Horário → 5. Nome → 6. Telefone → 7. Confirmação
+```
+
+### 2. Nova função: `findAvailableProfessionals()`
+
+```php
+private function findAvailableProfessionals($procedureId, $clinicaId) {
+    $stmt = $this->db->prepare("
+        SELECT u.id, u.name, u.specialty 
+        FROM usuarios u
+        JOIN profissional_procedimentos pp ON pp.usuario_id = u.id
+        WHERE pp.procedimento_id = :proc_id 
+        AND pp.clinica_id = :clinica_id
+        AND u.active = 1
+        AND u.role = 'doctor'
+    ");
+    $stmt->execute([':proc_id' => $procedureId, ':clinica_id' => $clinicaId]);
+    return $stmt->fetchAll();
+}
+```
+
+### 3. Modificar `checkAvailability()` para considerar profissional
+
+```php
+private function checkAvailability($date, $clinicaId, $usuarioId = null) {
+    // Se usuarioId especificado, busca horário individual
+    if ($usuarioId) {
+        $stmt = $this->db->prepare("
+            SELECT `open`, `close` FROM horario_profissional 
+            WHERE usuario_id = :usuario_id AND day = :day AND active = 1
+        ");
+        // ... continua verificando bloqueios específicos do profissional
+    }
+    // ... lógica existente como fallback
+}
+```
+
+### 4. Modificar `createAppointment()` para incluir profissional
+
 ```php
 $stmt = $this->db->prepare("
-    SELECT `open`, `close` FROM horario_funcionamento 
-    WHERE clinica_id = :clinica_id AND day = :day_of_week AND active = 1
+    INSERT INTO agendamentos (clinica_id, paciente_id, usuario_id, date, time, ...)
+    VALUES (:clinica_id, :paciente_id, :usuario_id, :date, :time, ...)
 ");
 ```
 
-O problema é a comparação `$isToday && $startTime <= $now`:
-```php
-$now = time();  // Usa timestamp do SERVIDOR (que pode estar 3h adiantado)
-$isToday = (date('Y-m-d') === $date);
-while ($startTime < $endTime) {
-    if ($isToday && $startTime <= $now) $isAvailable = false;  // PROBLEMA AQUI
-}
-```
+---
 
-O servidor está em UTC (3h adiantado em relação a Brasília). Se você está às 20h, o servidor acha que são 23h, e descarta todos os horários.
+## Arquivos a Criar/Modificar
 
-**Solução**: Configurar timezone do PHP para America/Sao_Paulo no início dos scripts.
+### Banco de Dados (SQL Migration):
+- `backend/database-update-v8-professionals.sql`
 
-### 3. Fuso Horário do Banco (3h adiantado)
-**Diagnóstico**: O banco (MySQL/MariaDB) e o PHP estão usando UTC por padrão, enquanto você está no fuso de Brasília (UTC-3).
+### Backend (PHP):
+| Arquivo | Ação |
+|---------|------|
+| `backend/api/team/procedures.php` | Criar |
+| `backend/api/team/schedule.php` | Criar |
+| `backend/api/appointments/index.php` | Modificar |
+| `backend/api/appointments/block.php` | Modificar |
+| `backend/api/services/OpenAIService.php` | Modificar |
+| `backend/api/finance/procedure-payments.php` | Modificar |
+| `backend/api/finance/summary.php` | Modificar |
 
-Quando o código faz `NOW()` ou `date('Y-m-d H:i:s')`, ele grava no horário do servidor (UTC), não no seu horário local.
-
-**Solução**: 
-1. Definir timezone no PHP: `date_default_timezone_set('America/Sao_Paulo')`
-2. Definir timezone na conexão MySQL: `SET time_zone = '-03:00'`
-
-### 4. Escalabilidade do Banco (1 linha por mensagem)
-**Diagnóstico**: Sim, cada mensagem gera uma linha. Isso é o padrão da indústria (WhatsApp, Telegram, todos fazem assim).
-
-**Por que é OK**:
-- Índices já existem: `idx_wpp_msg_phone_date` em `(phone, created_at DESC)`
-- Queries são filtradas por `clinica_id` + `phone`, muito rápidas
-- 100 clínicas × 100 mensagens/dia × 365 dias = ~3.6M linhas/ano = trivial para MySQL
-
-**Otimizações recomendadas**:
-1. Adicionar política de arquivamento (mover mensagens > 1 ano para tabela `whatsapp_messages_archive`)
-2. Adicionar índice composto para a query de conversa: `(clinica_id, phone, id)`
-3. Para consultas do drawer, limitar a últimas 100 mensagens
+### Frontend (React/TypeScript):
+| Arquivo | Ação |
+|---------|------|
+| `src/pages/app/Agenda.tsx` | Modificar (filtro por profissional) |
+| `src/pages/app/Financial.tsx` | Modificar (filtro por profissional) |
+| `src/components/config/TeamManagement.tsx` | Modificar (procedimentos/horário) |
+| `src/components/config/ProfessionalProcedures.tsx` | Criar |
+| `src/components/config/ProfessionalSchedule.tsx` | Criar |
+| `src/pages/app/Procedures.tsx` | Modificar (profissionais habilitados) |
+| `src/services/api.ts` | Modificar (novos endpoints) |
 
 ---
 
-## Arquivos a Modificar
+## Cronograma Sugerido de Implementação
 
-| Arquivo | Alteração |
-|---------|-----------|
-| `backend/api/config/Database.php` | Configurar timezone na conexão |
-| `backend/api/appointments/conversation.php` | Ordenar por `id` em vez de `created_at` |
-| `backend/api/services/OpenAIService.php` | Adicionar timezone no início |
-| `backend/api/ai/simulate-chat.php` | Adicionar timezone no início |
+### Fase 1: Banco de Dados + Backend Base
+1. Criar migration SQL com novas tabelas e colunas
+2. Criar endpoints de vínculo profissional-procedimento
+3. Modificar endpoints de agendamento
+
+### Fase 2: Frontend - Configuração
+1. Tela de procedimentos do profissional
+2. Tela de horário individual
+3. Integração com gestão de equipe
+
+### Fase 3: Frontend - Agenda
+1. Filtro por profissional
+2. Cores por profissional
+3. Modal de agendamento com seleção de profissional
+
+### Fase 4: IA
+1. Novo passo de seleção de profissional
+2. Algoritmo de balanceamento
+3. Verificação de disponibilidade por profissional
+
+### Fase 5: Financeiro
+1. Filtro por profissional
+2. Relatórios por profissional
 
 ---
 
-## Mudanças Técnicas
+## Compatibilidade com Dados Existentes
 
-### 1. Configurar Timezone na Conexão do Banco
+- Agendamentos antigos terão `usuario_id = NULL` (considerados "agenda geral")
+- Profissionais sem horário individual usarão horário da clínica como fallback
+- Procedimentos sem vínculo serão considerados "executáveis por todos os médicos"
 
-**Arquivo**: `backend/api/config/Database.php`
+---
 
-```php
-public function getConnection() {
-    $this->conn = null;
-    
-    // Define timezone do PHP para Brasília
-    date_default_timezone_set('America/Sao_Paulo');
+## Diagrama Resumido
 
-    try {
-        $this->conn = new PDO(
-            "mysql:host=" . $this->host . ";dbname=" . $this->db_name . ";charset=utf8mb4",
-            $this->username,
-            $this->password,
-            [
-                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-                PDO::ATTR_EMULATE_PREPARES => false
-            ]
-        );
-        
-        // Define timezone do MySQL para Brasília
-        $this->conn->exec("SET time_zone = '-03:00'");
-        
-    } catch(PDOException $exception) {
-        error_log("Connection error: " . $exception->getMessage());
-        throw new Exception("Erro de conexão com o banco de dados");
-    }
-
-    return $this->conn;
-}
-```
-
-### 2. Ordenar Mensagens por ID (Garantido Sequencial)
-
-**Arquivo**: `backend/api/appointments/conversation.php`
-
-Alterar de:
-```php
-ORDER BY created_at ASC
-```
-
-Para:
-```php
-ORDER BY id ASC
-```
-
-O `id` é auto-increment e garante a ordem de inserção, enquanto `created_at` pode ter colisões quando duas mensagens são inseridas no mesmo segundo.
-
-### 3. Adicionar Timezone nos Scripts Principais
-
-**Arquivos**: `backend/api/services/OpenAIService.php` e `backend/api/ai/simulate-chat.php`
-
-Adicionar no início de cada arquivo (após os `require_once`):
-
-```php
-// Garante timezone de Brasília
-date_default_timezone_set('America/Sao_Paulo');
+```text
+┌─────────────────────────────────────────────────────────────────┐
+│                         CLÍNICA                                 │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐ │
+│  │  MÉDICO A   │  │  MÉDICO B   │  │       MÉDICO C          │ │
+│  │ ───────────│  │ ─────────── │  │ ─────────────────────── │ │
+│  │ Limpeza    │  │ Limpeza     │  │ Extração                │ │
+│  │ Clareamento│  │ Canal       │  │ Implante                │ │
+│  │            │  │ Extração    │  │ Canal                   │ │
+│  └─────────────┘  └─────────────┘  └─────────────────────────┘ │
+│                                                                 │
+│  AGENDA:  [Todos] [Dr. A] [Dr. B] [Dr. C]                      │
+│  ┌──────┬──────┬──────┬──────┐                                 │
+│  │ 08:00│ Apto │ Apto │ Apto │                                 │
+│  │ 09:00│ João │ Apto │Maria │  ← Cores por profissional       │
+│  │ 10:00│ Apto │Carlos│ Apto │                                 │
+│  └──────┴──────┴──────┴──────┘                                 │
+│                                                                 │
+│  IA (WhatsApp):                                                │
+│  "Qual procedimento?" → "Extração"                             │
+│  "Preferência de profissional? Temos Dr. B e Dr. C"            │
+│  "Qualquer um" → Sistema escolhe com menos agenda              │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Sobre a Escalabilidade
+## Próximos Passos
 
-A estrutura atual (1 mensagem = 1 linha) é a forma correta. Alternativas como agrupar mensagens em JSON seriam piores para:
-- Busca por conteúdo
-- Ordenação
-- Paginação
-- Índices
+Após aprovação deste plano, começaremos pela **Fase 1** (Banco de Dados + Backend Base), pois é a fundação para todo o resto.
 
-**Quando preocupar**: A partir de ~10M+ linhas, considerar particionamento por data ou arquivamento.
-
-**Otimizações futuras (não urgentes)**:
-1. Criar job de arquivamento mensal para mensagens antigas
-2. Limitar query do drawer a 100 mensagens mais recentes
-3. Adicionar índice `(clinica_id, phone, id)` para acelerar ainda mais
-
----
-
-## Resumo das Correções
-
-| Problema | Causa | Solução |
-|----------|-------|---------|
-| Mensagens embaralhadas | Mesmo `created_at` para incoming/outgoing | Ordenar por `id ASC` |
-| IA ignora horário de funcionamento | Timezone do servidor = UTC | Configurar `America/Sao_Paulo` |
-| Banco 3h adiantado | MySQL usando UTC por padrão | `SET time_zone = '-03:00'` na conexão |
-| Escalabilidade | Preocupação prematura | Estrutura atual é correta; adicionar arquivamento futuro |
-
----
-
-## Sequência de Validação
-
-1. **Testar ordenação**: Abrir "Ver Conversa" e verificar se as mensagens estão na ordem correta
-2. **Testar timezone**: Verificar no banco se `created_at` agora grava no horário de Brasília
-3. **Testar IA + horário**: Configurar clínica para funcionar até 23:59 e testar agendamento às 21h
-4. **Verificar disponibilidade**: A IA deve retornar horários disponíveis para o dia atual
+Quer que eu priorize alguma fase específica ou ajuste algum aspecto do plano?
 
