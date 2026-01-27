@@ -104,7 +104,28 @@ class OpenAIService {
                 }
             }
             
-            // 1d. Palavras genéricas que indicam agendamento
+            // 1d. FALLBACK: Palavras que indicam consulta diretamente
+            if (empty($extracted['procedure'])) {
+                // Se menciona "consulta" explicitamente, trata como Consulta
+                if (stripos($messageLower, 'consulta') !== false || 
+                    stripos($messageLower, 'avalia') !== false ||
+                    stripos($messageLower, 'checkup') !== false ||
+                    stripos($messageLower, 'check-up') !== false) {
+                    $consultaProc = $this->findProcedureByAlias('consulta', $this->clinica['id']);
+                    if ($consultaProc) {
+                        $extracted['procedure'] = $consultaProc['name'];
+                        $extracted['procedure_id'] = $consultaProc['id'];
+                        $extracted['procedure_duration'] = $consultaProc['duration'] ?? 30;
+                    } else {
+                        $extracted['procedure'] = 'Consulta';
+                        $extracted['procedure_id'] = null;
+                        $extracted['procedure_duration'] = 30;
+                    }
+                    error_log("Procedimento = Consulta (fallback por palavra 'consulta')");
+                }
+            }
+            
+            // 1e. Palavras genéricas que indicam agendamento (sem procedimento específico)
             if (empty($extracted['procedure']) && (
                 stripos($messageLower, 'marcar') !== false ||
                 stripos($messageLower, 'agendar') !== false ||

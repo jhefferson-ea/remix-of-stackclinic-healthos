@@ -19,6 +19,27 @@ require_once __DIR__ . '/../services/OpenAIService.php';
 
 $method = $_SERVER['REQUEST_METHOD'];
 
+// =========================================
+// FUNÇÃO: Normaliza session_phone para <= 20 chars
+// =========================================
+function normalizeSessionPhone($phone) {
+    $phone = trim((string)$phone);
+    $phone = str_replace(' ', '', $phone);
+    return substr($phone, 0, 20); // Garante que cabe no VARCHAR(20)
+}
+
+// =========================================
+// FUNÇÃO: Gera session_phone curto para simulador
+// =========================================
+function generateShortSessionPhone($clinicaId) {
+    // Formato: S{cid}_{base36timestamp}{rand}
+    // Ex: S12_lk9z3f1a → máx 20 chars
+    $base36time = base_convert(time(), 10, 36);
+    $rand = substr(bin2hex(random_bytes(2)), 0, 3);
+    $phone = "S{$clinicaId}_{$base36time}{$rand}";
+    return normalizeSessionPhone($phone);
+}
+
 // Debug temporário - verificar método recebido
 error_log("simulate-chat.php - Method: " . $method);
 
@@ -34,6 +55,10 @@ if ($method === 'DELETE') {
         Response::badRequest('session_phone é obrigatório');
         exit;
     }
+    
+    // NORMALIZA o phone antes de usar nas queries
+    $sessionPhone = normalizeSessionPhone($sessionPhone);
+    error_log("DELETE session - Normalized phone: {$sessionPhone} (len=" . strlen($sessionPhone) . ")");
     
     try {
         $database = new Database();
@@ -59,6 +84,7 @@ if ($method === 'DELETE') {
             ':phone' => $sessionPhone
         ]);
         
+        error_log("DELETE session - Cleared successfully");
         Response::success(['cleared' => true]);
         exit;
         
@@ -87,10 +113,17 @@ if (empty($message)) {
     Response::badRequest('message é obrigatório');
 }
 
-// Gera telefone de sessão se não informado
+// Gera telefone de sessão curto se não informado
 if (!$sessionPhone) {
-    $sessionPhone = 'SIMULATOR_' . $clinicaId . '_' . time();
+    $sessionPhone = generateShortSessionPhone($clinicaId);
+} else {
+    // Normaliza o que veio do frontend
+    $sessionPhone = normalizeSessionPhone($sessionPhone);
 }
+
+// LOG DEBUG: Verificar session_phone
+error_log("===== SIMULATE-CHAT POST =====");
+error_log("session_phone: {$sessionPhone} (len=" . strlen($sessionPhone) . ")");
 
 try {
     $database = new Database();
@@ -149,6 +182,9 @@ try {
         $history = $conversationContext['messages'] ?? [];
         $collectedData = $conversationContext['collected_data'] ?? $collectedData;
         $currentStep = $conversationContext['current_step'] ?? 'greeting';
+        error_log("Session FOUND! collected_data: " . json_encode($collectedData));
+    } else {
+        error_log("Session NOT FOUND - starting fresh");
     }
     
     // Verifica se está transferido para humano
