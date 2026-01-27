@@ -215,10 +215,10 @@ PROMPT;
                 'type' => 'function',
                 'function' => [
                     'name' => 'getPatientInfo',
-                    'description' => 'Busca informações do paciente atual',
+                    'description' => 'Busca informações do paciente atual (se disponível)',
                     'parameters' => [
                         'type' => 'object',
-                        'properties' => [],
+                        'properties' => (object)[],
                         'required' => []
                     ]
                 ]
