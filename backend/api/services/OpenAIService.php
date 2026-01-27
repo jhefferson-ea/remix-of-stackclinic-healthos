@@ -41,46 +41,77 @@ class OpenAIService {
         $messageLower = mb_strtolower(trim($message), 'UTF-8');
         $messageOriginal = trim($message);
         
+        // LOG: Debug de extração
+        error_log("===== EXTRAÇÃO DE DADOS =====");
+        error_log("Mensagem: {$message}");
+        error_log("Dados atuais: " . json_encode($currentData));
+        
         // ========================================
-        // 1. DETECTA PROCEDIMENTO (fuzzy match)
+        // 1. DETECTA PROCEDIMENTO (com aliases e sintomas)
         // ========================================
         if (empty($extracted['procedure'])) {
             $procedures = $this->getProcedures();
-            foreach ($procedures as $proc) {
-                $procNameLower = mb_strtolower($proc['name'], 'UTF-8');
-                // Match exato ou parcial
-                if (stripos($messageLower, $procNameLower) !== false || 
-                    similar_text($messageLower, $procNameLower) > strlen($procNameLower) * 0.6) {
-                    $extracted['procedure'] = $proc['name'];
-                    $extracted['procedure_id'] = $proc['id'] ?? null;
-                    $extracted['procedure_duration'] = $proc['duration'] ?? 30;
-                    break;
+            
+            // 1a. Tenta match por ALIAS (ex: "canal" → "Tratamento de Canal")
+            $proc = $this->findProcedureByAlias($messageLower, $this->clinica['id']);
+            if ($proc) {
+                $extracted['procedure'] = $proc['name'];
+                $extracted['procedure_id'] = $proc['id'] ?? null;
+                $extracted['procedure_duration'] = $proc['duration'] ?? 30;
+                error_log("Procedimento detectado por alias: {$proc['name']}");
+            }
+            
+            // 1b. Match exato ou parcial pelo nome
+            if (empty($extracted['procedure'])) {
+                foreach ($procedures as $proc) {
+                    $procNameLower = mb_strtolower($proc['name'], 'UTF-8');
+                    if (stripos($messageLower, $procNameLower) !== false) {
+                        $extracted['procedure'] = $proc['name'];
+                        $extracted['procedure_id'] = $proc['id'] ?? null;
+                        $extracted['procedure_duration'] = $proc['duration'] ?? 30;
+                        error_log("Procedimento detectado por nome: {$proc['name']}");
+                        break;
+                    }
                 }
             }
             
-            // Keywords genéricas
+            // 1c. SINTOMAS → Consulta (REGRA DE NEGÓCIO)
+            // Quando cliente descreve problema, tratamos como Consulta
             if (empty($extracted['procedure'])) {
-                $keywords = [
-                    'consulta' => 'Consulta',
-                    'avaliação' => 'Avaliação',
-                    'retorno' => 'Retorno',
-                    'limpeza' => 'Limpeza',
-                    'check' => 'Check-up',
-                    'exame' => 'Exame'
-                ];
-                foreach ($keywords as $keyword => $procName) {
-                    if (stripos($messageLower, $keyword) !== false) {
-                        // Verifica se existe procedimento similar
-                        foreach ($procedures as $proc) {
-                            if (stripos(mb_strtolower($proc['name'], 'UTF-8'), $keyword) !== false) {
-                                $extracted['procedure'] = $proc['name'];
-                                $extracted['procedure_id'] = $proc['id'] ?? null;
-                                $extracted['procedure_duration'] = $proc['duration'] ?? 30;
-                                break 2;
-                            }
-                        }
+                $symptomKeywords = ['dor', 'doendo', 'doi', 'inchado', 'inchaço', 'sangr', 'quebr', 'caiu', 
+                                    'mole', 'sensib', 'latejando', 'inflamad', 'abscess', 'problema'];
+                $hasSymptom = false;
+                foreach ($symptomKeywords as $kw) {
+                    if (stripos($messageLower, $kw) !== false) {
+                        $hasSymptom = true;
+                        break;
                     }
                 }
+                
+                if ($hasSymptom) {
+                    // Busca procedimento de consulta na clínica
+                    $consultaProc = $this->findProcedureByAlias('consulta', $this->clinica['id']);
+                    if ($consultaProc) {
+                        $extracted['procedure'] = $consultaProc['name'];
+                        $extracted['procedure_id'] = $consultaProc['id'];
+                        $extracted['procedure_duration'] = $consultaProc['duration'] ?? 30;
+                    } else {
+                        $extracted['procedure'] = 'Consulta';
+                        $extracted['procedure_id'] = null;
+                        $extracted['procedure_duration'] = 30;
+                    }
+                    error_log("Procedimento = Consulta (detectado sintoma)");
+                }
+            }
+            
+            // 1d. Palavras genéricas que indicam agendamento
+            if (empty($extracted['procedure']) && (
+                stripos($messageLower, 'marcar') !== false ||
+                stripos($messageLower, 'agendar') !== false ||
+                stripos($messageLower, 'quero') !== false
+            )) {
+                // Não definimos procedimento - a IA deve perguntar
+                error_log("Intenção de agendamento detectada, mas procedimento não especificado");
             }
         }
         
@@ -281,9 +312,9 @@ class OpenAIService {
         $assistantMessage = $response['choices'][0]['message'] ?? null;
         
         if (isset($assistantMessage['tool_calls'])) {
-            $result = $this->handleToolCalls($assistantMessage, $messages, $tools);
-            $result['collected_data'] = $collectedData;
-            return $result;
+            // Passa collectedData para handleToolCalls para atualização
+            $result = $this->handleToolCalls($assistantMessage, $messages, $tools, $collectedData);
+            return $result; // collected_data já é atualizado dentro de handleToolCalls
         }
         
         return [
@@ -296,7 +327,7 @@ class OpenAIService {
     }
     
     /**
-     * Monta system message COM ESTADO EXPLÍCITO (prompt enxuto)
+     * Monta system message COM ESTADO EXPLÍCITO (prompt anti-alucinação)
      */
     private function buildSystemMessageWithState($collectedData, $currentStep) {
         $clinicName = $this->clinica['name'] ?? 'Clínica';
@@ -312,59 +343,103 @@ class OpenAIService {
         
         // Busca procedimentos
         $procedures = $this->getProcedures();
-        $proceduresList = empty($procedures) ? "- Consulta Geral: Preço a consultar\n" : '';
+        $proceduresList = empty($procedures) ? "- Consulta Geral\n" : '';
         foreach ($procedures as $proc) {
-            $proceduresList .= "- {$proc['name']}: R$ " . number_format($proc['price'], 2, ',', '.') . " ({$proc['duration']} min)\n";
+            $proceduresList .= "- {$proc['name']}\n";
         }
         
-        // Estado explícito
-        $stateInfo = "
-# DADOS JÁ COLETADOS NESTA CONVERSA
-- Procedimento: " . ($collectedData['procedure'] ?? '❌ NÃO INFORMADO') . "
-- Data: " . ($collectedData['date'] ? date('d/m/Y', strtotime($collectedData['date'])) . " ({$collectedData['date']})" : '❌ NÃO INFORMADO') . "
-- Horário: " . ($collectedData['time'] ?? '❌ NÃO INFORMADO') . "
-- Nome do paciente: " . ($collectedData['patient_name'] ?? '❌ NÃO INFORMADO') . "
-
-# SEU PRÓXIMO PASSO (SIGA EXATAMENTE)
-" . $this->getNextStepInstruction($collectedData);
+        // Estado explícito com formatação clara
+        $procStatus = $collectedData['procedure'] ? "✅ {$collectedData['procedure']}" : '❌ NÃO INFORMADO';
+        $dateStatus = $collectedData['date'] ? "✅ " . date('d/m/Y', strtotime($collectedData['date'])) : '❌ NÃO INFORMADO';
+        $timeStatus = $collectedData['time'] ? "✅ {$collectedData['time']}" : '❌ NÃO INFORMADO';
+        $nameStatus = $collectedData['patient_name'] ? "✅ {$collectedData['patient_name']}" : '❌ NÃO INFORMADO';
+        
+        $nextStep = $this->getNextStepInstruction($collectedData);
 
         // Tom
         $toneInstruction = match($aiTone) {
-            'formal' => 'Use linguagem formal. Trate por "senhor" ou "senhora".',
-            'empathetic' => 'Seja acolhedor e empático.',
-            default => 'Seja amigável e natural.',
+            'formal' => 'Use "senhor/senhora".',
+            'empathetic' => 'Seja acolhedor.',
+            default => 'Seja amigável.',
         };
 
         $systemPrompt = <<<PROMPT
-Você é {$aiName}, atendente virtual da {$clinicName}.
+Você é {$aiName}, atendente da {$clinicName}. HOJE: {$currentDate} ({$currentDayName}) às {$currentTime}
 
-HOJE: {$currentDate} ({$currentDayName}) | AGORA: {$currentTime}
+PROCEDIMENTOS: {$proceduresList}
 
-PROCEDIMENTOS DISPONÍVEIS:
-{$proceduresList}
+═══════════════════════════════════════
+ESTADO ATUAL DA CONVERSA (LEIA COM ATENÇÃO)
+═══════════════════════════════════════
+Procedimento: {$procStatus}
+Data: {$dateStatus}
+Horário: {$timeStatus}
+Nome: {$nameStatus}
 
-{$stateInfo}
+PRÓXIMO PASSO: {$nextStep}
+═══════════════════════════════════════
 
-REGRAS ABSOLUTAS:
-1. Faça apenas UMA pergunta por mensagem
-2. Seja objetivo (máximo 2 frases curtas)
-3. Use checkAvailability ANTES de oferecer horários
-4. Só use createAppointment quando tiver TODOS os dados ✅
-5. NUNCA invente dados - use EXATAMENTE o que o cliente informou
-6. Se o cliente informou vários dados de uma vez, reconheça todos
+REGRAS ABSOLUTAS (SIGA OU A CONVERSA FALHARÁ):
 
-INTERPRETAÇÃO DE DATAS:
-- "amanhã" → dia seguinte
-- "segunda", "terça" → próxima ocorrência do dia
-- "dia 15" → dia 15 deste mês (ou próximo)
-- Converta para formato YYYY-MM-DD ao chamar checkAvailability
+1. NUNCA SUGIRA procedimentos. O sistema já detectou automaticamente acima.
+2. Se Procedimento = "NÃO INFORMADO", pergunte: "Qual procedimento deseja?"
+3. Se Procedimento = ✅, NÃO pergunte de novo. Vá para o próximo campo ❌.
+4. MÁXIMO 2 frases curtas. UMA pergunta por vez.
+5. Use checkAvailability ANTES de oferecer horários.
+6. Só use createAppointment quando TODOS estiverem ✅.
+7. NUNCA invente dados. Use EXATAMENTE o que está acima.
+
+EXEMPLOS:
+- Se Procedimento=✅ e Data=❌ → "Para qual data prefere?"
+- Se Data=✅ e Horário=❌ → chame checkAvailability, depois mostre opções
+- Se Horário=✅ e Nome=❌ → "Qual seu nome completo?"
+- Se TODOS=✅ → chame createAppointment
 
 TOM: {$toneInstruction}
-
-IMPORTANTE: O sistema já detectou automaticamente os dados acima. Se algum dado está como "NÃO INFORMADO", você DEVE perguntar por ele seguindo a ordem: procedimento → data → horário → nome.
 PROMPT;
 
         return $systemPrompt;
+    }
+    
+    /**
+     * Busca procedimento por alias/variação comum
+     */
+    private function findProcedureByAlias($term, $clinicaId) {
+        // Mapeamento de aliases para categorias de procedimento
+        $aliases = [
+            'canal' => ['canal', 'endodontia', 'tratamento de canal', 'tratar canal'],
+            'siso' => ['siso', 'terceiro molar', 'dente do juízo', 'juizo'],
+            'extração' => ['extração', 'extrair', 'arrancar'],
+            'limpeza' => ['limpeza', 'profilaxia', 'tartaro', 'tártaro'],
+            'clareamento' => ['clareamento', 'branqueamento', 'clarear'],
+            'implante' => ['implante', 'implant'],
+            'ortodontia' => ['aparelho', 'ortodont', 'alinhar', 'alinhador'],
+            'consulta' => ['consulta', 'avaliação', 'avaliaç', 'checkup', 'check-up', 'avaliar']
+        ];
+        
+        $termLower = mb_strtolower(trim($term), 'UTF-8');
+        
+        foreach ($aliases as $category => $terms) {
+            foreach ($terms as $alias) {
+                if (stripos($termLower, $alias) !== false) {
+                    // Busca procedimento que contenha a categoria ou o alias
+                    $stmt = $this->db->prepare("
+                        SELECT id, name, duration FROM procedimentos 
+                        WHERE clinica_id = :cid AND active = 1 
+                        AND (LOWER(name) LIKE :term1 OR LOWER(name) LIKE :term2)
+                        LIMIT 1
+                    ");
+                    $stmt->execute([
+                        ':cid' => $clinicaId, 
+                        ':term1' => "%{$category}%",
+                        ':term2' => "%{$alias}%"
+                    ]);
+                    $proc = $stmt->fetch();
+                    if ($proc) return $proc;
+                }
+            }
+        }
+        return null;
     }
     
     // ========================================
@@ -453,9 +528,10 @@ PROMPT;
         ];
     }
     
-    private function handleToolCalls($assistantMessage, $messages, $tools) {
+    private function handleToolCalls($assistantMessage, $messages, $tools, $collectedData = []) {
         $toolCalls = $assistantMessage['tool_calls'];
         $functionResults = [];
+        $updatedCollectedData = $collectedData;
         
         $messages[] = $assistantMessage;
         
@@ -469,6 +545,21 @@ PROMPT;
             $result = $this->executeFunction($functionName, $arguments);
             
             error_log("Result: " . json_encode($result));
+            
+            // ATUALIZA ESTADO BASEADO NOS TOOL CALLS
+            if ($functionName === 'checkAvailability' && !empty($arguments['date'])) {
+                $updatedCollectedData['date'] = $arguments['date'];
+            }
+            if ($functionName === 'createAppointment' && ($result['success'] ?? false)) {
+                // Limpa estado após agendamento confirmado
+                $updatedCollectedData = [
+                    'procedure' => null,
+                    'date' => null,
+                    'time' => null,
+                    'patient_name' => null,
+                    'patient_phone' => null
+                ];
+            }
             
             $functionResults[] = [
                 'function' => $functionName,
@@ -490,7 +581,8 @@ PROMPT;
             return [
                 'success' => false,
                 'error' => $response['message'] ?? 'Falha ao processar resultados',
-                'function_calls' => $functionResults
+                'function_calls' => $functionResults,
+                'collected_data' => $updatedCollectedData
             ];
         }
         
@@ -500,7 +592,8 @@ PROMPT;
             'success' => true,
             'response' => $finalMessage,
             'tokens_used' => $response['usage']['total_tokens'] ?? 0,
-            'function_calls' => $functionResults
+            'function_calls' => $functionResults,
+            'collected_data' => $updatedCollectedData
         ];
     }
     
