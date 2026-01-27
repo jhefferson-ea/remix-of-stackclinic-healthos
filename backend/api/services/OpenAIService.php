@@ -14,6 +14,9 @@
  * - Dados obrigatórios: procedimento + data + hora + nome completo
  */
 
+// Garante timezone de Brasília para todas as operações de data/hora
+date_default_timezone_set('America/Sao_Paulo');
+
 class OpenAIService {
     private $apiKey;
     private $model = 'gpt-4o-mini';
