@@ -36,6 +36,14 @@ class ApiService {
     }
 
     try {
+      // Debug (frontend): ajuda a identificar se está batendo no backend correto
+      // (ex.: se estiver indo para ngrok/Evolution por engano)
+      console.debug('[API] Request', {
+        url,
+        method: options.method || 'GET',
+        hasBody: Boolean(options.body),
+      });
+
       const response = await fetch(url, {
         ...options,
         headers: {
@@ -44,7 +52,25 @@ class ApiService {
         },
       });
 
-      const jsonResponse = await response.json();
+      const contentType = response.headers.get('content-type') || '';
+      const isJson = contentType.includes('application/json');
+      const payloadText = await response.text();
+
+      // Se vier HTML (ex.: ngrok warning) ou algo não-JSON, mostramos isso para debug
+      if (!isJson) {
+        console.warn('[API] Non-JSON response', {
+          url,
+          status: response.status,
+          contentType,
+          preview: payloadText.slice(0, 300),
+        });
+        return {
+          success: false,
+          error: `Resposta inválida do servidor (status ${response.status}).`,
+        };
+      }
+
+      const jsonResponse = JSON.parse(payloadText);
 
       if (!response.ok || jsonResponse.success === false) {
         return {
