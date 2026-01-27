@@ -244,7 +244,7 @@ export default function Landing() {
               className="text-4xl md:text-5xl lg:text-6xl font-bold text-foreground mb-6 leading-tight"
             >
               A gestão da sua clínica{' '}
-              <span className="text-primary">direto no WhatsApp</span>
+              <span className="text-primary">por IA</span>
             </motion.h1>
 
             <motion.p
