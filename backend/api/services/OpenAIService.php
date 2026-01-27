@@ -161,7 +161,7 @@ PROMPT;
                 'type' => 'function',
                 'function' => [
                     'name' => 'createAppointment',
-                    'description' => 'Cria um novo agendamento para o paciente',
+                    'description' => 'Cria um novo agendamento. IMPORTANTE: Antes de chamar esta função, você DEVE ter coletado o nome completo do paciente. Se não tiver o nome, pergunte primeiro.',
                     'parameters' => [
                         'type' => 'object',
                         'properties' => [
@@ -176,9 +176,17 @@ PROMPT;
                             'procedure_name' => [
                                 'type' => 'string',
                                 'description' => 'Nome do procedimento'
+                            ],
+                            'patient_name' => [
+                                'type' => 'string',
+                                'description' => 'Nome completo do paciente (obrigatório para criar agendamento)'
+                            ],
+                            'patient_phone' => [
+                                'type' => 'string',
+                                'description' => 'Telefone do paciente (opcional, usa o da conversa se não informado)'
                             ]
                         ],
-                        'required' => ['date', 'time']
+                        'required' => ['date', 'time', 'patient_name']
                     ]
                 ]
             ],
@@ -279,6 +287,8 @@ PROMPT;
                     $arguments['date'],
                     $arguments['time'],
                     $arguments['procedure_name'] ?? null,
+                    $arguments['patient_name'] ?? null,
+                    $arguments['patient_phone'] ?? null,
                     $clinicaId
                 );
                 
@@ -392,10 +402,44 @@ PROMPT;
     
     /**
      * Cria um agendamento
+     * Agora aceita patient_name e patient_phone para criar paciente se necessário
      */
-    private function createAppointment($date, $time, $procedureName, $clinicaId) {
+    private function createAppointment($date, $time, $procedureName, $patientName, $patientPhone, $clinicaId) {
+        // Se não temos paciente, precisamos criar um
         if (!$this->paciente) {
-            return ['success' => false, 'error' => 'Paciente não identificado'];
+            if (empty($patientName)) {
+                return [
+                    'success' => false, 
+                    'error' => 'Nome do paciente é obrigatório para criar agendamento. Por favor, pergunte o nome completo do paciente.'
+                ];
+            }
+            
+            // Usa telefone informado ou gera um temporário
+            $phone = $patientPhone ?: ('WHATSAPP_' . time());
+            
+            try {
+                // Cria o paciente
+                $stmt = $this->db->prepare("
+                    INSERT INTO pacientes (clinica_id, name, phone, is_lead, lead_source, created_at)
+                    VALUES (:clinica_id, :name, :phone, 0, 'whatsapp', NOW())
+                ");
+                $stmt->execute([
+                    ':clinica_id' => $clinicaId,
+                    ':name' => $patientName,
+                    ':phone' => $phone
+                ]);
+                
+                $pacienteId = $this->db->lastInsertId();
+                $this->paciente = [
+                    'id' => $pacienteId,
+                    'name' => $patientName,
+                    'phone' => $phone,
+                    'is_lead' => 0
+                ];
+            } catch (Exception $e) {
+                error_log("Erro ao criar paciente: " . $e->getMessage());
+                return ['success' => false, 'error' => 'Erro ao criar paciente'];
+            }
         }
         
         // Busca procedimento se informado
@@ -432,7 +476,7 @@ PROMPT;
         // Cria o agendamento
         try {
             $stmt = $this->db->prepare("
-                INSERT INTO agendamentos (clinica_id, patient_id, date, time, duration, procedure, procedimento_id, status, notes)
+                INSERT INTO agendamentos (clinica_id, patient_id, date, time, duration, `procedure`, procedimento_id, status, notes)
                 VALUES (:clinica_id, :patient_id, :date, :time, :duration, :procedure, :procedimento_id, 'confirmed', 'Agendado via WhatsApp')
             ");
             $stmt->execute([
@@ -448,6 +492,8 @@ PROMPT;
             return [
                 'success' => true,
                 'appointment_id' => $this->db->lastInsertId(),
+                'patient_id' => $this->paciente['id'],
+                'patient_name' => $this->paciente['name'],
                 'date' => $date,
                 'time' => $time,
                 'procedure' => $procedureName ?? 'Consulta'
