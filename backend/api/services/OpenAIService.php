@@ -8,10 +8,12 @@
  * - current_step: Em qual passo da máquina de estados estamos
  * - A IA recebe estado explícito, não precisa deduzir do histórico
  * 
- * REGRAS DE NEGÓCIO:
- * - Agenda é POR CLÍNICA (não por profissional)
- * - Paciente só é criado ao CONFIRMAR agendamento
- * - Dados obrigatórios: procedimento + data + hora + nome completo
+ * REGRAS DE NEGÓCIO (v2 - MULTI-PROFISSIONAL):
+ * - Cada profissional pode ter procedimentos específicos
+ * - Se múltiplos profissionais fazem o procedimento, pergunta preferência
+ * - Algoritmo de balanceamento quando paciente não escolhe
+ * - Profissional sem horário individual usa horário da clínica como fallback
+ * - Dados obrigatórios: procedimento + [profissional se múltiplos] + data + hora + nome completo
  */
 
 // Garante timezone de Brasília para todas as operações de data/hora
@@ -41,19 +43,174 @@ class OpenAIService {
     }
     
     // ========================================
+    // MULTI-PROFISSIONAL: FUNÇÕES AUXILIARES
+    // ========================================
+    
+    /**
+     * Busca profissionais que executam um procedimento específico
+     * Retorna lista de profissionais habilitados OU todos os médicos se não há vínculo
+     */
+    private function findProfessionalsForProcedure($procedureId, $clinicaId) {
+        if (!$procedureId) {
+            // Sem procedimento específico, retorna todos os médicos ativos
+            return $this->getAllDoctors($clinicaId);
+        }
+        
+        // Busca profissionais vinculados ao procedimento
+        $stmt = $this->db->prepare("
+            SELECT u.id, u.name, u.specialty, u.color
+            FROM usuarios u
+            INNER JOIN profissional_procedimentos pp ON pp.usuario_id = u.id
+            WHERE pp.procedimento_id = :proc_id 
+            AND pp.clinica_id = :clinica_id
+            AND u.active = 1 
+            AND u.role = 'doctor'
+            ORDER BY u.name
+        ");
+        $stmt->execute([':proc_id' => $procedureId, ':clinica_id' => $clinicaId]);
+        $professionals = $stmt->fetchAll();
+        
+        // Se não há vínculos, retorna todos os médicos (fallback)
+        if (empty($professionals)) {
+            return $this->getAllDoctors($clinicaId);
+        }
+        
+        return $professionals;
+    }
+    
+    /**
+     * Retorna todos os médicos ativos da clínica
+     */
+    private function getAllDoctors($clinicaId) {
+        $stmt = $this->db->prepare("
+            SELECT id, name, specialty, color 
+            FROM usuarios 
+            WHERE clinica_id = :clinica_id AND active = 1 AND role = 'doctor'
+            ORDER BY name
+        ");
+        $stmt->execute([':clinica_id' => $clinicaId]);
+        return $stmt->fetchAll();
+    }
+    
+    /**
+     * Algoritmo de balanceamento: seleciona profissional com menos agendamentos na data
+     */
+    private function selectProfessionalByBalance($professionals, $date, $clinicaId) {
+        if (empty($professionals)) return null;
+        if (count($professionals) === 1) return $professionals[0];
+        
+        $minAppointments = PHP_INT_MAX;
+        $selectedProfessional = $professionals[0];
+        
+        foreach ($professionals as $prof) {
+            // Conta agendamentos do profissional na data
+            $stmt = $this->db->prepare("
+                SELECT COUNT(*) as total 
+                FROM agendamentos 
+                WHERE clinica_id = :clinica_id 
+                AND usuario_id = :usuario_id 
+                AND date = :date 
+                AND status NOT IN ('cancelled', 'no_show')
+            ");
+            $stmt->execute([
+                ':clinica_id' => $clinicaId,
+                ':usuario_id' => $prof['id'],
+                ':date' => $date
+            ]);
+            $result = $stmt->fetch();
+            $count = $result['total'] ?? 0;
+            
+            if ($count < $minAppointments) {
+                $minAppointments = $count;
+                $selectedProfessional = $prof;
+            }
+        }
+        
+        error_log("Balanceamento: Selecionado {$selectedProfessional['name']} (menor carga na data {$date})");
+        return $selectedProfessional;
+    }
+    
+    /**
+     * Busca profissional por nome parcial
+     */
+    private function findProfessionalByName($name, $clinicaId) {
+        if (!$name) return null;
+        
+        $nameLower = mb_strtolower(trim($name), 'UTF-8');
+        
+        $stmt = $this->db->prepare("
+            SELECT id, name, specialty, color 
+            FROM usuarios 
+            WHERE clinica_id = :clinica_id 
+            AND active = 1 
+            AND role = 'doctor'
+            AND LOWER(name) LIKE :name
+            LIMIT 1
+        ");
+        $stmt->execute([':clinica_id' => $clinicaId, ':name' => '%' . $nameLower . '%']);
+        return $stmt->fetch() ?: null;
+    }
+    
+    /**
+     * Busca horário de funcionamento do profissional (ou fallback para clínica)
+     */
+    private function getProfessionalWorkingHours($usuarioId, $clinicaId, $dayOfWeek) {
+        // Primeiro tenta horário individual do profissional
+        if ($usuarioId) {
+            $stmt = $this->db->prepare("
+                SELECT `open`, `close` FROM horario_profissional 
+                WHERE usuario_id = :usuario_id AND day = :day AND active = 1
+            ");
+            $stmt->execute([':usuario_id' => $usuarioId, ':day' => $dayOfWeek]);
+            $hours = $stmt->fetch();
+            if ($hours) {
+                error_log("Usando horário INDIVIDUAL do profissional {$usuarioId} para dia {$dayOfWeek}");
+                return $hours;
+            }
+        }
+        
+        // Fallback: horário da clínica
+        $stmt = $this->db->prepare("
+            SELECT `open`, `close` FROM horario_funcionamento 
+            WHERE clinica_id = :clinica_id AND day = :day AND active = 1
+        ");
+        $stmt->execute([':clinica_id' => $clinicaId, ':day' => $dayOfWeek]);
+        return $stmt->fetch() ?: null;
+    }
+    
+    /**
+     * Verifica bloqueios do profissional (ou bloqueios gerais se usuario_id = NULL)
+     */
+    private function getProfessionalBlocks($usuarioId, $clinicaId, $date, $dayOfWeek) {
+        // Bloqueios específicos do profissional + bloqueios gerais da clínica
+        $stmt = $this->db->prepare("
+            SELECT start_time, end_time FROM bloqueios_agenda 
+            WHERE clinica_id = :clinica_id 
+            AND (usuario_id IS NULL OR usuario_id = :usuario_id)
+            AND (specific_date = :date OR (recurring = 1 AND day_of_week = :day_of_week))
+        ");
+        $stmt->execute([
+            ':clinica_id' => $clinicaId, 
+            ':usuario_id' => $usuarioId,
+            ':date' => $date, 
+            ':day_of_week' => $dayOfWeek
+        ]);
+        return $stmt->fetchAll();
+    }
+    
+    // ========================================
     // EXTRAÇÃO AUTOMÁTICA DE DADOS
     // ========================================
     
     /**
      * Extrai dados automaticamente da mensagem do usuário
-     * Detecta nomes, telefones, datas, horários, procedimentos
+     * Detecta nomes, telefones, datas, horários, procedimentos, preferência de profissional
      */
     public function extractDataFromMessage($message, $currentData = []) {
         $extracted = $currentData;
         $messageLower = mb_strtolower(trim($message), 'UTF-8');
         $messageOriginal = trim($message);
         
-        // LOG: Debug de extração
         error_log("===== EXTRAÇÃO DE DADOS =====");
         error_log("Mensagem: {$message}");
         error_log("Dados atuais: " . json_encode($currentData));
@@ -88,7 +245,6 @@ class OpenAIService {
             }
             
             // 1c. SINTOMAS → Consulta (REGRA DE NEGÓCIO)
-            // Quando cliente descreve problema, tratamos como Consulta
             if (empty($extracted['procedure'])) {
                 $symptomKeywords = ['dor', 'doendo', 'doi', 'inchado', 'inchaço', 'sangr', 'quebr', 'caiu', 
                                     'mole', 'sensib', 'latejando', 'inflamad', 'abscess', 'problema'];
@@ -101,7 +257,6 @@ class OpenAIService {
                 }
                 
                 if ($hasSymptom) {
-                    // Busca procedimento de consulta na clínica
                     $consultaProc = $this->findProcedureByAlias('consulta', $this->clinica['id']);
                     if ($consultaProc) {
                         $extracted['procedure'] = $consultaProc['name'];
@@ -118,7 +273,6 @@ class OpenAIService {
             
             // 1d. FALLBACK: Palavras que indicam consulta diretamente
             if (empty($extracted['procedure'])) {
-                // Se menciona "consulta" explicitamente, trata como Consulta
                 if (stripos($messageLower, 'consulta') !== false || 
                     stripos($messageLower, 'avalia') !== false ||
                     stripos($messageLower, 'checkup') !== false ||
@@ -143,13 +297,44 @@ class OpenAIService {
                 stripos($messageLower, 'agendar') !== false ||
                 stripos($messageLower, 'quero') !== false
             )) {
-                // Não definimos procedimento - a IA deve perguntar
                 error_log("Intenção de agendamento detectada, mas procedimento não especificado");
             }
         }
         
         // ========================================
-        // 2. DETECTA DATA
+        // 2. DETECTA PREFERÊNCIA DE PROFISSIONAL
+        // ========================================
+        if (empty($extracted['professional_id']) && !empty($extracted['procedure_id'])) {
+            // Verifica se usuário mencionou preferência de profissional
+            $professionals = $this->findProfessionalsForProcedure($extracted['procedure_id'], $this->clinica['id']);
+            
+            // Detecta se disse "qualquer um", "tanto faz", "sem preferência"
+            $noPreference = preg_match('/qualquer\s*(um|profissional|m[eé]dico)?|tanto\s+faz|sem\s+prefer[eê]ncia|n[aã]o\s+(tenho|tem)\s+prefer/iu', $messageLower);
+            
+            if ($noPreference && count($professionals) > 1) {
+                // Marca para usar balanceamento automático
+                $extracted['professional_preference'] = 'auto';
+                error_log("Profissional: cliente sem preferência, usará balanceamento automático");
+            } else {
+                // Tenta encontrar nome de profissional na mensagem
+                foreach ($professionals as $prof) {
+                    $profNameLower = mb_strtolower($prof['name'], 'UTF-8');
+                    // Extrai primeiro nome e sobrenome para match flexível
+                    $nameParts = explode(' ', $profNameLower);
+                    foreach ($nameParts as $part) {
+                        if (strlen($part) > 2 && stripos($messageLower, $part) !== false) {
+                            $extracted['professional_id'] = $prof['id'];
+                            $extracted['professional_name'] = $prof['name'];
+                            error_log("Profissional detectado: {$prof['name']}");
+                            break 2;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // ========================================
+        // 3. DETECTA DATA
         // ========================================
         if (empty($extracted['date'])) {
             $today = new DateTime();
@@ -188,7 +373,6 @@ class OpenAIService {
                 $month = isset($m[2]) ? (int)$m[2] : (int)$today->format('m');
                 $year = (int)$today->format('Y');
                 
-                // Se é nome do mês
                 if (isset($m[2]) && !is_numeric($m[2])) {
                     $monthsMap = [
                         'janeiro' => 1, 'fevereiro' => 2, 'março' => 3, 'marco' => 3,
@@ -199,7 +383,6 @@ class OpenAIService {
                     $month = $monthsMap[mb_strtolower($m[2], 'UTF-8')] ?? (int)$today->format('m');
                 }
                 
-                // Se a data já passou neste ano, vai para o próximo
                 $dateCandidate = sprintf('%04d-%02d-%02d', $year, $month, $day);
                 if (strtotime($dateCandidate) < strtotime($today->format('Y-m-d'))) {
                     $dateCandidate = sprintf('%04d-%02d-%02d', $year + 1, $month, $day);
@@ -212,7 +395,7 @@ class OpenAIService {
         }
         
         // ========================================
-        // 3. DETECTA HORÁRIO
+        // 4. DETECTA HORÁRIO
         // ========================================
         if (empty($extracted['time'])) {
             // "14h", "14:00", "14 horas", "às 14"
@@ -227,24 +410,21 @@ class OpenAIService {
         }
         
         // ========================================
-        // 4. DETECTA NOME (2+ palavras com maiúsculas)
+        // 5. DETECTA NOME (2+ palavras com maiúsculas)
         // ========================================
         if (empty($extracted['patient_name'])) {
-            // Padrão: Nome Sobrenome (2+ palavras começando com maiúscula)
             if (preg_match('/^([A-ZÀ-ÚÇ][a-zà-úç]+(?:\s+[A-ZÀ-ÚÇa-zà-úç]+)+)$/u', $messageOriginal, $m)) {
                 $extracted['patient_name'] = trim($m[1]);
             }
-            // Padrão: "meu nome é X" ou "me chamo X" ou "sou o/a X"
             elseif (preg_match('/(?:meu\s+nome\s+[ée]|me\s+chamo|sou\s+o|sou\s+a|sou)\s+([A-ZÀ-ÚÇ][a-zà-úç]+(?:\s+[A-ZÀ-ÚÇa-zà-úç]+)*)/iu', $messageOriginal, $m)) {
                 $extracted['patient_name'] = trim($m[1]);
             }
         }
         
         // ========================================
-        // 5. DETECTA TELEFONE
+        // 6. DETECTA TELEFONE
         // ========================================
         if (empty($extracted['patient_phone'])) {
-            // Formatos: (11) 99999-9999, 11999999999, etc
             if (preg_match('/\(?\d{2}\)?\s*\d{4,5}[-\s]?\d{4}/', $messageOriginal, $m)) {
                 $extracted['patient_phone'] = preg_replace('/\D/', '', $m[0]);
             }
@@ -255,14 +435,18 @@ class OpenAIService {
     
     /**
      * Determina o passo atual baseado nos dados coletados
-     * Fluxo: procedimento -> data -> horário -> nome -> telefone -> confirmação
+     * Fluxo v2: procedimento -> [profissional se múltiplos] -> data -> horário -> nome -> telefone -> confirmação
      */
     public function determineCurrentStep($collectedData) {
+        // Verifica se precisa perguntar profissional
+        $needsProfessional = $this->needsProfessionalSelection($collectedData);
+        
         if (!empty($collectedData['patient_name']) && 
             !empty($collectedData['patient_phone']) &&
             !empty($collectedData['date']) && 
             !empty($collectedData['time']) && 
-            !empty($collectedData['procedure'])) {
+            !empty($collectedData['procedure']) &&
+            (!$needsProfessional || !empty($collectedData['professional_id']) || $collectedData['professional_preference'] === 'auto')) {
             return 'confirm';
         }
         if (!empty($collectedData['patient_name'])) {
@@ -274,6 +458,11 @@ class OpenAIService {
         if (!empty($collectedData['date'])) {
             return 'time';
         }
+        // NOVO: Se tem procedimento mas precisa escolher profissional
+        if (!empty($collectedData['procedure']) && $needsProfessional && 
+            empty($collectedData['professional_id']) && ($collectedData['professional_preference'] ?? '') !== 'auto') {
+            return 'professional';
+        }
         if (!empty($collectedData['procedure'])) {
             return 'date';
         }
@@ -281,14 +470,40 @@ class OpenAIService {
     }
     
     /**
-     * Retorna instrução do próximo passo
+     * Verifica se precisa perguntar preferência de profissional
+     */
+    private function needsProfessionalSelection($collectedData) {
+        if (empty($collectedData['procedure_id'])) return false;
+        
+        $professionals = $this->findProfessionalsForProcedure(
+            $collectedData['procedure_id'], 
+            $this->clinica['id']
+        );
+        
+        // Se mais de 1 profissional faz o procedimento, precisa perguntar
+        return count($professionals) > 1;
+    }
+    
+    /**
+     * Retorna instrução do próximo passo (atualizado para multi-profissional)
      */
     private function getNextStepInstruction($collectedData) {
         if (empty($collectedData['procedure'])) {
             return "O cliente ainda não escolheu o procedimento. Pergunte qual procedimento deseja agendar.";
         }
+        
+        // NOVO: Verifica se precisa perguntar profissional
+        if ($this->needsProfessionalSelection($collectedData)) {
+            if (empty($collectedData['professional_id']) && ($collectedData['professional_preference'] ?? '') !== 'auto') {
+                $professionals = $this->findProfessionalsForProcedure($collectedData['procedure_id'], $this->clinica['id']);
+                $names = array_map(fn($p) => $p['name'], $professionals);
+                return "O cliente escolheu {$collectedData['procedure']}. Pergunte se tem preferência por algum profissional: " . implode(', ', $names) . ". Ou pode dizer 'qualquer um'.";
+            }
+        }
+        
         if (empty($collectedData['date'])) {
-            return "O cliente já escolheu o procedimento '{$collectedData['procedure']}'. Pergunte para qual data prefere.";
+            $profInfo = !empty($collectedData['professional_name']) ? " com {$collectedData['professional_name']}" : "";
+            return "O cliente já escolheu {$collectedData['procedure']}{$profInfo}. Pergunte para qual data prefere.";
         }
         if (empty($collectedData['time'])) {
             return "O cliente quer agendar para {$collectedData['date']}. Use checkAvailability para ver horários disponíveis e mostre as opções.";
@@ -299,7 +514,9 @@ class OpenAIService {
         if (empty($collectedData['patient_phone'])) {
             return "O cliente informou nome '{$collectedData['patient_name']}'. Pergunte o telefone para contato (com DDD).";
         }
-        return "TODOS OS DADOS COLETADOS! Use createAppointment para confirmar: {$collectedData['procedure']} em {$collectedData['date']} às {$collectedData['time']} para {$collectedData['patient_name']} (tel: {$collectedData['patient_phone']}).";
+        
+        $profInfo = !empty($collectedData['professional_name']) ? " com {$collectedData['professional_name']}" : "";
+        return "TODOS OS DADOS COLETADOS! Use createAppointment para confirmar: {$collectedData['procedure']}{$profInfo} em {$collectedData['date']} às {$collectedData['time']} para {$collectedData['patient_name']} (tel: {$collectedData['patient_phone']}).";
     }
     
     // ========================================
@@ -312,7 +529,6 @@ class OpenAIService {
     public function processMessageWithState($message, $history, $collectedData, $currentStep) {
         $systemMessage = $this->buildSystemMessageWithState($collectedData, $currentStep);
         
-        // LOG: Debug
         error_log("===== ESTADO ATUAL =====");
         error_log("Step: {$currentStep}");
         error_log("Dados: " . json_encode($collectedData));
@@ -330,13 +546,10 @@ class OpenAIService {
             ];
         }
         
-        // Adiciona mensagem atual
         $messages[] = ['role' => 'user', 'content' => $message];
         
-        // Define as tools disponíveis
         $tools = $this->getAvailableTools();
         
-        // Faz a chamada para a OpenAI
         $response = $this->callOpenAI($messages, $tools);
         
         if (!$response || isset($response['error'])) {
@@ -349,13 +562,11 @@ class OpenAIService {
             ];
         }
         
-        // Verifica se há function calls
         $assistantMessage = $response['choices'][0]['message'] ?? null;
         
         if (isset($assistantMessage['tool_calls'])) {
-            // Passa collectedData para handleToolCalls para atualização
             $result = $this->handleToolCalls($assistantMessage, $messages, $tools, $collectedData);
-            return $result; // collected_data já é atualizado dentro de handleToolCalls
+            return $result;
         }
         
         return [
@@ -368,29 +579,44 @@ class OpenAIService {
     }
     
     /**
-     * Monta system message COM ESTADO EXPLÍCITO (prompt anti-alucinação)
+     * Monta system message COM ESTADO EXPLÍCITO (atualizado para multi-profissional)
      */
     private function buildSystemMessageWithState($collectedData, $currentStep) {
         $clinicName = $this->clinica['name'] ?? 'Clínica';
         $aiName = $this->clinica['ai_name'] ?? 'Atendente';
         $aiTone = $this->clinica['ai_tone'] ?? 'casual';
         
-        // Data/hora atual
         $currentDate = date('d/m/Y');
         $currentTime = date('H:i');
         $currentDateISO = date('Y-m-d');
         $daysOfWeek = ['domingo', 'segunda-feira', 'terça-feira', 'quarta-feira', 'quinta-feira', 'sexta-feira', 'sábado'];
         $currentDayName = $daysOfWeek[date('w')];
         
-        // Busca procedimentos
         $procedures = $this->getProcedures();
         $proceduresList = empty($procedures) ? "- Consulta Geral\n" : '';
         foreach ($procedures as $proc) {
             $proceduresList .= "- {$proc['name']}\n";
         }
         
-        // Estado explícito com formatação clara
+        // Estado explícito
         $procStatus = $collectedData['procedure'] ? "✅ {$collectedData['procedure']}" : '❌ NÃO INFORMADO';
+        
+        // NOVO: Status do profissional
+        $profStatus = '—';
+        $needsProf = $this->needsProfessionalSelection($collectedData);
+        if ($needsProf) {
+            if (!empty($collectedData['professional_name'])) {
+                $profStatus = "✅ {$collectedData['professional_name']}";
+            } elseif (($collectedData['professional_preference'] ?? '') === 'auto') {
+                $profStatus = "✅ Automático (balanceamento)";
+            } else {
+                // Lista opções disponíveis
+                $professionals = $this->findProfessionalsForProcedure($collectedData['procedure_id'] ?? null, $this->clinica['id']);
+                $names = array_map(fn($p) => $p['name'], $professionals);
+                $profStatus = "❌ PERGUNTAR (opções: " . implode(', ', $names) . ")";
+            }
+        }
+        
         $dateStatus = $collectedData['date'] ? "✅ " . date('d/m/Y', strtotime($collectedData['date'])) : '❌ NÃO INFORMADO';
         $timeStatus = $collectedData['time'] ? "✅ {$collectedData['time']}" : '❌ NÃO INFORMADO';
         $nameStatus = $collectedData['patient_name'] ? "✅ {$collectedData['patient_name']}" : '❌ NÃO INFORMADO';
@@ -398,12 +624,14 @@ class OpenAIService {
         
         $nextStep = $this->getNextStepInstruction($collectedData);
 
-        // Tom
         $toneInstruction = match($aiTone) {
             'formal' => 'Use "senhor/senhora".',
             'empathetic' => 'Seja acolhedor.',
             default => 'Seja amigável.',
         };
+        
+        // Condicional: mostra linha de profissional só se necessário
+        $profLine = $needsProf ? "Profissional: {$profStatus}\n" : "";
 
         $systemPrompt = <<<PROMPT
 Você é {$aiName}, atendente da {$clinicName}. HOJE: {$currentDate} ({$currentDayName}) às {$currentTime}
@@ -414,7 +642,7 @@ PROCEDIMENTOS: {$proceduresList}
 ESTADO ATUAL DA CONVERSA (LEIA COM ATENÇÃO)
 ═══════════════════════════════════════
 Procedimento: {$procStatus}
-Data: {$dateStatus}
+{$profLine}Data: {$dateStatus}
 Horário: {$timeStatus}
 Nome: {$nameStatus}
 Telefone: {$phoneStatus}
@@ -426,14 +654,17 @@ REGRAS ABSOLUTAS (SIGA OU A CONVERSA FALHARÁ):
 
 1. NUNCA SUGIRA procedimentos. O sistema já detectou automaticamente acima.
 2. Se Procedimento = "NÃO INFORMADO", pergunte: "Qual procedimento deseja?"
-3. Se Procedimento = ✅, NÃO pergunte de novo. Vá para o próximo campo ❌.
-4. MÁXIMO 2 frases curtas. UMA pergunta por vez.
-5. Use checkAvailability ANTES de oferecer horários.
-6. Só use createAppointment quando TODOS (incluindo telefone) estiverem ✅.
-7. NUNCA invente dados. Use EXATAMENTE o que está acima.
+3. Se Profissional = "PERGUNTAR", pergunte: "Você tem preferência por algum profissional? [listar nomes]"
+4. Se cliente disser "qualquer um/tanto faz", aceite e siga para a data.
+5. Se Procedimento = ✅, NÃO pergunte de novo. Vá para o próximo campo ❌.
+6. MÁXIMO 2 frases curtas. UMA pergunta por vez.
+7. Use checkAvailability ANTES de oferecer horários.
+8. Só use createAppointment quando TODOS (incluindo telefone) estiverem ✅.
+9. NUNCA invente dados. Use EXATAMENTE o que está acima.
 
 EXEMPLOS:
-- Se Procedimento=✅ e Data=❌ → "Para qual data prefere?"
+- Se Procedimento=✅ e Profissional=❌ PERGUNTAR → "Você tem preferência por Dr. João ou Dra. Maria?"
+- Se Profissional=✅ e Data=❌ → "Para qual data prefere?"
 - Se Data=✅ e Horário=❌ → chame checkAvailability, depois mostre opções
 - Se Horário=✅ e Nome=❌ → "Qual seu nome completo?"
 - Se Nome=✅ e Telefone=❌ → "Qual seu telefone para contato (com DDD)?"
@@ -449,7 +680,6 @@ PROMPT;
      * Busca procedimento por alias/variação comum
      */
     private function findProcedureByAlias($term, $clinicaId) {
-        // Mapeamento de aliases para categorias de procedimento
         $aliases = [
             'canal' => ['canal', 'endodontia', 'tratamento de canal', 'tratar canal'],
             'siso' => ['siso', 'terceiro molar', 'dente do juízo', 'juizo'],
@@ -466,7 +696,6 @@ PROMPT;
         foreach ($aliases as $category => $terms) {
             foreach ($terms as $alias) {
                 if (stripos($termLower, $alias) !== false) {
-                    // Busca procedimento que contenha a categoria ou o alias
                     $stmt = $this->db->prepare("
                         SELECT id, name, duration FROM procedimentos 
                         WHERE clinica_id = :cid AND active = 1 
@@ -491,23 +720,25 @@ PROMPT;
     // ========================================
     
     public function processMessage($message, $conversationHistory = []) {
-        // Extrai dados da conversa atual
         $collectedData = [
             'procedure' => null,
+            'procedure_id' => null,
+            'procedure_duration' => 30,
+            'professional_id' => null,
+            'professional_name' => null,
+            'professional_preference' => null,
             'date' => null,
             'time' => null,
             'patient_name' => null,
             'patient_phone' => null
         ];
         
-        // Tenta extrair dados de todo o histórico
         foreach ($conversationHistory as $msg) {
             if ($msg['direction'] === 'incoming') {
                 $collectedData = $this->extractDataFromMessage($msg['message'], $collectedData);
             }
         }
         
-        // Extrai da mensagem atual
         $collectedData = $this->extractDataFromMessage($message, $collectedData);
         $currentStep = $this->determineCurrentStep($collectedData);
         
@@ -524,13 +755,17 @@ PROMPT;
                 'type' => 'function',
                 'function' => [
                     'name' => 'checkAvailability',
-                    'description' => 'Verifica horários disponíveis para uma data. Use SEMPRE antes de oferecer horários.',
+                    'description' => 'Verifica horários disponíveis para uma data e profissional. Use SEMPRE antes de oferecer horários.',
                     'parameters' => [
                         'type' => 'object',
                         'properties' => [
                             'date' => [
                                 'type' => 'string',
                                 'description' => 'Data no formato YYYY-MM-DD'
+                            ],
+                            'professional_id' => [
+                                'type' => 'integer',
+                                'description' => 'ID do profissional (opcional, se não informado busca agenda geral)'
                             ]
                         ],
                         'required' => ['date']
@@ -549,7 +784,8 @@ PROMPT;
                             'time' => ['type' => 'string', 'description' => 'Horário HH:MM'],
                             'procedure_name' => ['type' => 'string', 'description' => 'Nome do procedimento'],
                             'patient_name' => ['type' => 'string', 'description' => 'Nome completo do paciente (OBRIGATÓRIO)'],
-                            'patient_phone' => ['type' => 'string', 'description' => 'Telefone com DDD (OBRIGATÓRIO)']
+                            'patient_phone' => ['type' => 'string', 'description' => 'Telefone com DDD (OBRIGATÓRIO)'],
+                            'professional_id' => ['type' => 'integer', 'description' => 'ID do profissional (opcional)']
                         ],
                         'required' => ['date', 'time', 'procedure_name', 'patient_name', 'patient_phone']
                     ]
@@ -586,7 +822,7 @@ PROMPT;
             error_log("===== TOOL CALL: {$functionName} =====");
             error_log("Args: " . json_encode($arguments));
             
-            $result = $this->executeFunction($functionName, $arguments);
+            $result = $this->executeFunction($functionName, $arguments, $updatedCollectedData);
             
             error_log("Result: " . json_encode($result));
             
@@ -598,6 +834,11 @@ PROMPT;
                 // Limpa estado após agendamento confirmado
                 $updatedCollectedData = [
                     'procedure' => null,
+                    'procedure_id' => null,
+                    'procedure_duration' => 30,
+                    'professional_id' => null,
+                    'professional_name' => null,
+                    'professional_preference' => null,
                     'date' => null,
                     'time' => null,
                     'patient_name' => null,
@@ -641,18 +882,42 @@ PROMPT;
         ];
     }
     
-    private function executeFunction($functionName, $arguments) {
+    private function executeFunction($functionName, $arguments, $collectedData = []) {
         $clinicaId = $this->clinica['id'];
         
         switch ($functionName) {
             case 'checkAvailability':
                 $date = $this->sanitizeDate($arguments['date'] ?? '');
+                $professionalId = isset($arguments['professional_id']) ? (int)$arguments['professional_id'] : null;
+                
+                // Se não tem profissional específico mas tem preferência "auto", usa balanceamento
+                if (!$professionalId && ($collectedData['professional_preference'] ?? '') === 'auto' && !empty($collectedData['procedure_id'])) {
+                    $professionals = $this->findProfessionalsForProcedure($collectedData['procedure_id'], $clinicaId);
+                    $selected = $this->selectProfessionalByBalance($professionals, $date, $clinicaId);
+                    if ($selected) {
+                        $professionalId = $selected['id'];
+                        error_log("Balanceamento aplicado: usando profissional {$selected['name']} (ID: {$professionalId})");
+                    }
+                }
+                
                 if (!$date) {
                     return ['available' => false, 'error' => 'Data inválida'];
                 }
-                return $this->checkAvailability($date, $clinicaId);
+                return $this->checkAvailability($date, $clinicaId, $professionalId);
                 
             case 'createAppointment':
+                $professionalId = isset($arguments['professional_id']) ? (int)$arguments['professional_id'] : null;
+                
+                // Se não tem profissional específico mas tem preferência "auto", usa balanceamento
+                if (!$professionalId && ($collectedData['professional_preference'] ?? '') === 'auto' && !empty($collectedData['procedure_id'])) {
+                    $date = $this->sanitizeDate($arguments['date'] ?? '');
+                    $professionals = $this->findProfessionalsForProcedure($collectedData['procedure_id'], $clinicaId);
+                    $selected = $this->selectProfessionalByBalance($professionals, $date, $clinicaId);
+                    if ($selected) {
+                        $professionalId = $selected['id'];
+                    }
+                }
+                
                 return $this->createAppointment(
                     $this->sanitizeDate($arguments['date'] ?? ''),
                     $this->sanitizeTime($arguments['time'] ?? ''),
@@ -660,7 +925,8 @@ PROMPT;
                     $this->sanitizeString($arguments['patient_name'] ?? ''),
                     $this->sanitizePhone($arguments['patient_phone'] ?? ''),
                     $clinicaId,
-                    $this->sessionPhone // Passa session_phone para vincular conversa
+                    $this->sessionPhone,
+                    $professionalId
                 );
                 
             case 'transferToHuman':
@@ -710,44 +976,51 @@ PROMPT;
     }
     
     // ========================================
-    // FUNÇÕES DE NEGÓCIO
+    // FUNÇÕES DE NEGÓCIO (ATUALIZADAS PARA MULTI-PROFISSIONAL)
     // ========================================
     
-    private function checkAvailability($date, $clinicaId) {
+    /**
+     * Verifica disponibilidade - ATUALIZADO para suportar profissional específico
+     */
+    private function checkAvailability($date, $clinicaId, $professionalId = null) {
         if (strtotime($date) < strtotime(date('Y-m-d'))) {
             return ['available' => false, 'message' => 'Não é possível agendar para datas passadas'];
         }
         
-        // Agendamentos existentes
-        $stmt = $this->db->prepare("
-            SELECT time, duration FROM agendamentos 
-            WHERE clinica_id = :clinica_id AND date = :date AND status NOT IN ('cancelled', 'no_show')
-            ORDER BY time
-        ");
-        $stmt->execute([':clinica_id' => $clinicaId, ':date' => $date]);
-        $appointments = $stmt->fetchAll();
-        
-        // Bloqueios
         $dayOfWeek = date('w', strtotime($date));
-        $stmt = $this->db->prepare("
-            SELECT start_time, end_time FROM bloqueios_agenda 
-            WHERE clinica_id = :clinica_id AND (specific_date = :date OR (recurring = 1 AND day_of_week = :day_of_week))
-        ");
-        $stmt->execute([':clinica_id' => $clinicaId, ':date' => $date, ':day_of_week' => $dayOfWeek]);
-        $blocks = $stmt->fetchAll();
         
-        // Horário de funcionamento
-        $stmt = $this->db->prepare("
-            SELECT `open`, `close` FROM horario_funcionamento 
-            WHERE clinica_id = :clinica_id AND day = :day_of_week AND active = 1
-        ");
-        $stmt->execute([':clinica_id' => $clinicaId, ':day_of_week' => $dayOfWeek]);
-        $workingHours = $stmt->fetch();
+        // Busca horário de funcionamento (individual ou clínica)
+        $workingHours = $this->getProfessionalWorkingHours($professionalId, $clinicaId, $dayOfWeek);
         
         if (!$workingHours) {
             $daysName = ['domingo', 'segunda-feira', 'terça-feira', 'quarta-feira', 'quinta-feira', 'sexta-feira', 'sábado'];
-            return ['available' => false, 'message' => "A clínica não funciona na {$daysName[$dayOfWeek]}"];
+            $msg = $professionalId ? "O profissional não atende na {$daysName[$dayOfWeek]}" : "A clínica não funciona na {$daysName[$dayOfWeek]}";
+            return ['available' => false, 'message' => $msg];
         }
+        
+        // Agendamentos existentes (filtrado por profissional se especificado)
+        if ($professionalId) {
+            $stmt = $this->db->prepare("
+                SELECT time, duration FROM agendamentos 
+                WHERE clinica_id = :clinica_id AND date = :date 
+                AND usuario_id = :usuario_id
+                AND status NOT IN ('cancelled', 'no_show')
+                ORDER BY time
+            ");
+            $stmt->execute([':clinica_id' => $clinicaId, ':date' => $date, ':usuario_id' => $professionalId]);
+        } else {
+            $stmt = $this->db->prepare("
+                SELECT time, duration FROM agendamentos 
+                WHERE clinica_id = :clinica_id AND date = :date 
+                AND status NOT IN ('cancelled', 'no_show')
+                ORDER BY time
+            ");
+            $stmt->execute([':clinica_id' => $clinicaId, ':date' => $date]);
+        }
+        $appointments = $stmt->fetchAll();
+        
+        // Bloqueios (individual + gerais)
+        $blocks = $this->getProfessionalBlocks($professionalId, $clinicaId, $date, $dayOfWeek);
         
         // Gera slots
         $availableSlots = [];
@@ -797,12 +1070,16 @@ PROMPT;
             'available' => true,
             'date' => $date,
             'date_formatted' => $dateFormatted,
+            'professional_id' => $professionalId,
             'slots' => $availableSlots,
             'message' => "Horários disponíveis para {$dateFormatted}: " . implode(', ', array_slice($availableSlots, 0, 6))
         ];
     }
     
-    private function createAppointment($date, $time, $procedureName, $patientName, $patientPhone, $clinicaId, $sessionPhone = null) {
+    /**
+     * Cria agendamento - ATUALIZADO para incluir usuario_id (profissional)
+     */
+    private function createAppointment($date, $time, $procedureName, $patientName, $patientPhone, $clinicaId, $sessionPhone = null, $professionalId = null) {
         if (!$date) return ['success' => false, 'error' => 'Data inválida.'];
         if (!$time) return ['success' => false, 'error' => 'Horário inválido.'];
         if (strlen($patientName) < 3) return ['success' => false, 'error' => 'Nome do paciente é obrigatório.'];
@@ -828,7 +1105,7 @@ PROMPT;
         }
         
         // Verifica disponibilidade
-        $availability = $this->checkAvailability($date, $clinicaId);
+        $availability = $this->checkAvailability($date, $clinicaId, $professionalId);
         if (!$availability['available']) {
             return ['success' => false, 'error' => $availability['message'] ?? 'Data não disponível'];
         }
@@ -836,9 +1113,7 @@ PROMPT;
             return ['success' => false, 'error' => "Horário {$time} não disponível. Horários livres: " . implode(', ', array_slice($availability['slots'], 0, 5))];
         }
         
-        // ========================================
-        // VALIDA SE PACIENTE JÁ EXISTE PELO TELEFONE
-        // ========================================
+        // Valida se paciente já existe pelo telefone
         $existingPatient = null;
         if ($patientPhone) {
             $stmt = $this->db->prepare("
@@ -873,17 +1148,16 @@ PROMPT;
             }
         }
         
-        // ========================================
-        // CRIA AGENDAMENTO COM SESSION_PHONE
-        // ========================================
+        // Cria agendamento COM usuario_id (profissional)
         try {
             $stmt = $this->db->prepare("
-                INSERT INTO agendamentos (clinica_id, paciente_id, date, time, duration, `procedure`, procedimento_id, status, notes, session_phone, created_at)
-                VALUES (:clinica_id, :paciente_id, :date, :time, :duration, :procedure, :procedimento_id, 'confirmed', 'Agendado via WhatsApp IA', :session_phone, NOW())
+                INSERT INTO agendamentos (clinica_id, paciente_id, usuario_id, date, time, duration, `procedure`, procedimento_id, status, notes, session_phone, created_at)
+                VALUES (:clinica_id, :paciente_id, :usuario_id, :date, :time, :duration, :procedure, :procedimento_id, 'confirmed', 'Agendado via WhatsApp IA', :session_phone, NOW())
             ");
             $stmt->execute([
                 ':clinica_id' => $clinicaId,
                 ':paciente_id' => $this->paciente['id'],
+                ':usuario_id' => $professionalId, // NOVO: inclui profissional
                 ':date' => $date,
                 ':time' => $time,
                 ':duration' => $duration,
@@ -895,18 +1169,28 @@ PROMPT;
             $appointmentId = $this->db->lastInsertId();
             $dateFormatted = date('d/m/Y', strtotime($date));
             
-            error_log("Agendamento criado: ID {$appointmentId} (session_phone: {$sessionPhone})");
+            // Busca nome do profissional para a mensagem
+            $profName = '';
+            if ($professionalId) {
+                $stmt = $this->db->prepare("SELECT name FROM usuarios WHERE id = :id");
+                $stmt->execute([':id' => $professionalId]);
+                $prof = $stmt->fetch();
+                if ($prof) $profName = " com {$prof['name']}";
+            }
+            
+            error_log("Agendamento criado: ID {$appointmentId} (profissional: {$professionalId}, session_phone: {$sessionPhone})");
             
             return [
                 'success' => true,
                 'appointment_id' => $appointmentId,
                 'patient_id' => $this->paciente['id'],
                 'patient_name' => $this->paciente['name'],
+                'professional_id' => $professionalId,
                 'date' => $date,
                 'date_formatted' => $dateFormatted,
                 'time' => $time,
                 'procedure' => $procedureNameFinal,
-                'message' => "Agendamento confirmado: {$procedureNameFinal} em {$dateFormatted} às {$time} para {$this->paciente['name']}"
+                'message' => "Agendamento confirmado: {$procedureNameFinal}{$profName} em {$dateFormatted} às {$time} para {$this->paciente['name']}"
             ];
         } catch (Exception $e) {
             error_log("Erro agendamento: " . $e->getMessage());
