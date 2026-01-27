@@ -1,235 +1,207 @@
 
 
-# Plano: Tornar a IA Robusta para Conversas Multi-Turn
+# Plano: Consertar a IA para Conversar Corretamente
 
-## Diagnóstico
+## Diagnóstico Técnico
 
-A IA funciona quando você manda tudo em uma mensagem, mas se perde em conversas de múltiplas mensagens porque:
+### Bug 1: Estado não persiste entre mensagens
+O método `processMessageWithState` retorna `$collectedData` sem atualizações. Os dados que a IA extrai da conversa são **perdidos**.
 
-1. **Modelo muito simples**: GPT-4o-mini tem limitações em manter contexto
-2. **Prompt muito extenso**: Muitas regras confundem o modelo
-3. **Falta estado explícito**: A IA não sabe o que já foi coletado
+### Bug 2: Extração de procedimento falha para sintomas
+"Dor no siso" não casa com nenhum procedimento cadastrado. A extração retorna `null`, mas a IA **inventa** um procedimento em vez de perguntar.
 
-## Solução: Estado Explícito + Prompt Enxuto
+### Bug 3: A IA ignora as instruções do prompt
+Mesmo recebendo "Procedimento: ❌ NÃO INFORMADO", a IA responde sugerindo "canal" - alucinação típica do GPT-4o-mini.
 
-A estratégia é manter um **objeto de estado** que diz para a IA exatamente o que já foi coletado e o que falta, eliminando a necessidade de ela "deduzir" isso do histórico.
+### Bug 4: Regra de negócio não implementada
+Cliente disse "dor no siso" → deveria ser tratado como **Consulta**, não como sugestão de procedimento.
 
 ---
 
-## Arquivos a Modificar
+## Solução
+
+### Arquivos a Modificar
 
 | Arquivo | Alteração |
 |---------|-----------|
-| `backend/api/ai/simulate-chat.php` | Gerenciar estado da conversa (dados coletados) |
-| `backend/api/services/OpenAIService.php` | Receber e usar estado, simplificar prompt |
+| `backend/api/services/OpenAIService.php` | Corrigir extração, atualizar estado, melhorar prompt |
+| `backend/api/ai/simulate-chat.php` | Pequenos ajustes de persistência |
 
 ---
 
-## Detalhes Técnicos
+## Mudanças Técnicas
 
-### 1. Novo Formato de Contexto de Sessão
+### 1. Nova Regra: Sintomas → Consulta
 
-```php
-// Em simulate-chat.php
-$conversationContext = [
-    'messages' => [...],  // Histórico de mensagens
-    'collected_data' => [
-        'procedure' => null,     // Ex: "Limpeza"
-        'date' => null,          // Ex: "2026-01-28"
-        'time' => null,          // Ex: "14:00"
-        'patient_name' => null,  // Ex: "João Silva"
-        'patient_phone' => null  // Opcional
-    ],
-    'current_step' => 'greeting', // greeting|procedure|date|time|name|confirm
-    'last_activity' => '...'
-];
-```
-
-### 2. Função para Detectar Dados na Mensagem
-
-No `OpenAIService.php`, criar lógica que detecta automaticamente se a mensagem contém dados:
+Quando o cliente descreve um problema (dor, desconforto, inchaço, etc.) sem pedir um procedimento específico, o sistema deve tratar como "Consulta" automaticamente.
 
 ```php
-private function extractDataFromMessage($message, $currentData) {
-    $extracted = $currentData;
-    
-    // Detecta nomes (2+ palavras, primeira letra maiúscula)
-    if (preg_match('/^[A-ZÀ-Ú][a-zà-ú]+\s+[A-ZÀ-Ú][a-zà-ú]+/', $message)) {
-        $extracted['patient_name'] = trim($message);
+// Em extractDataFromMessage()
+$symptomKeywords = ['dor', 'doendo', 'inchado', 'sangr', 'quebr', 'caiu', 'mole'];
+$hasSymptom = false;
+foreach ($symptomKeywords as $kw) {
+    if (stripos($messageLower, $kw) !== false) {
+        $hasSymptom = true;
+        break;
     }
-    
-    // Detecta telefones
-    if (preg_match('/\(?\d{2}\)?\s*\d{4,5}[\-\s]?\d{4}/', $message, $m)) {
-        $extracted['patient_phone'] = preg_replace('/\D/', '', $m[0]);
-    }
-    
-    // Detecta horários
-    if (preg_match('/(\d{1,2})[:h]?(\d{2})?/', $message, $m)) {
-        $hour = str_pad($m[1], 2, '0', STR_PAD_LEFT);
-        $min = $m[2] ?? '00';
-        $extracted['time'] = "{$hour}:{$min}";
-    }
-    
-    // Detecta datas relativas
-    if (stripos($message, 'amanhã') !== false) {
-        $extracted['date'] = date('Y-m-d', strtotime('+1 day'));
-    }
-    
-    return $extracted;
+}
+
+// Se tem sintoma e NÃO pediu procedimento específico → Consulta
+if ($hasSymptom && empty($extracted['procedure'])) {
+    $extracted['procedure'] = 'Consulta';
+    $extracted['procedure_id'] = null; // Busca depois
 }
 ```
 
-### 3. Prompt Simplificado com Estado Explícito
+### 2. Aliases para Procedimentos
+
+Criar mapeamento de termos comuns para procedimentos reais.
 
 ```php
-$stateInfo = "
-# DADOS JÁ COLETADOS NESTA CONVERSA
-- Procedimento: " . ($collectedData['procedure'] ?? 'NÃO INFORMADO') . "
-- Data: " . ($collectedData['date'] ?? 'NÃO INFORMADO') . "
-- Horário: " . ($collectedData['time'] ?? 'NÃO INFORMADO') . "
-- Nome do paciente: " . ($collectedData['patient_name'] ?? 'NÃO INFORMADO') . "
-
-# PRÓXIMO PASSO
-" . $this->getNextStepInstruction($collectedData) . "
-";
-```
-
-### 4. Função para Determinar Próximo Passo
-
-```php
-private function getNextStepInstruction($data) {
-    if (empty($data['procedure'])) {
-        return "Pergunte qual procedimento deseja agendar.";
+private function findProcedureByAlias($term, $clinicaId) {
+    $aliases = [
+        'canal' => ['canal', 'endodontia', 'tratamento de canal'],
+        'siso' => ['siso', 'extração', 'terceiro molar', 'dente do juízo'],
+        'limpeza' => ['limpeza', 'profilaxia', 'tartaro'],
+        'clareamento' => ['clareamento', 'branqueamento'],
+        'implante' => ['implante', 'implant'],
+        'ortodontia' => ['aparelho', 'ortodont', 'alinhar'],
+        'consulta' => ['consulta', 'avaliação', 'avaliaç', 'checkup', 'check-up']
+    ];
+    
+    $termLower = mb_strtolower($term, 'UTF-8');
+    
+    foreach ($aliases as $category => $terms) {
+        foreach ($terms as $alias) {
+            if (stripos($termLower, $alias) !== false) {
+                // Busca procedimento que contenha a categoria
+                $stmt = $this->db->prepare("
+                    SELECT id, name, duration FROM procedimentos 
+                    WHERE clinica_id = :cid AND active = 1 
+                    AND (name LIKE :term1 OR name LIKE :term2)
+                    LIMIT 1
+                ");
+                $stmt->execute([
+                    ':cid' => $clinicaId, 
+                    ':term1' => "%{$category}%",
+                    ':term2' => "%{$alias}%"
+                ]);
+                $proc = $stmt->fetch();
+                if ($proc) return $proc;
+            }
+        }
     }
-    if (empty($data['date'])) {
-        return "Pergunte para qual data prefere.";
-    }
-    if (empty($data['time'])) {
-        return "Use checkAvailability para mostrar horários disponíveis e pergunte qual prefere.";
-    }
-    if (empty($data['patient_name'])) {
-        return "Pergunte o nome completo do paciente.";
-    }
-    return "Todos os dados coletados! Use createAppointment para confirmar.";
+    return null;
 }
 ```
 
-### 5. Prompt Reduzido e Focado
+### 3. Atualizar Estado na Resposta
+
+O método `processMessageWithState` precisa atualizar `collected_data` com dados que a IA extraiu via tool calls.
+
+```php
+// Em handleToolCalls()
+if ($result['function_calls']) {
+    foreach ($result['function_calls'] as $call) {
+        if ($call['function'] === 'checkAvailability') {
+            // Se chamou checkAvailability, a data está confirmada
+            $collectedData['date'] = $call['arguments']['date'] ?? $collectedData['date'];
+        }
+        if ($call['function'] === 'createAppointment' && $call['result']['success']) {
+            // Limpa após sucesso
+            $collectedData = [...reset...];
+        }
+    }
+}
+$result['collected_data'] = $collectedData; // AGORA RETORNA ATUALIZADO
+```
+
+### 4. Prompt Mais Rígido (Anti-Alucinação)
 
 ```php
 $systemPrompt = <<<PROMPT
-Você é {$aiName}, atendente virtual da {$clinicName}.
-
-HOJE: {$currentDate} ({$currentDayName}) - AGORA: {$currentTime}
+Você é {$aiName}, atendente da {$clinicName}. HOJE: {$currentDate} ({$currentDayName}) às {$currentTime}
 
 PROCEDIMENTOS:
 {$proceduresList}
 
+# ESTADO ATUAL DA CONVERSA
 {$stateInfo}
 
-REGRAS:
-1. Faça apenas UMA pergunta por mensagem
-2. Seja objetivo e direto (máximo 2 frases)
-3. Use checkAvailability antes de oferecer horários
-4. Só use createAppointment quando tiver TODOS os dados
-5. NUNCA invente dados - use apenas o que o cliente informou
+# REGRAS ABSOLUTAS (SIGA OU A CONVERSA FALHARÁ)
+
+1. NUNCA SUGIRA procedimentos. Se o cliente descrever sintomas, trate como "Consulta".
+2. Se "Procedimento" está como NÃO INFORMADO acima, você DEVE perguntar: "Qual procedimento deseja agendar?"
+3. APENAS uma pergunta por mensagem. MÁXIMO 2 frases.
+4. Use checkAvailability ANTES de oferecer horários.
+5. NUNCA invente dados. Use EXATAMENTE o que está em "ESTADO ATUAL".
+6. Só chame createAppointment quando TODOS os campos acima estiverem preenchidos.
+
+EXEMPLOS CORRETOS:
+- Cliente: "oi" → Você: "Olá! Como posso ajudar?"
+- Cliente: "estou com dor no siso" → Você: "Vou agendar uma consulta para você. Para qual data prefere?"
+- Cliente: "quero fazer canal" → (detecta procedimento) → Você: "Para qual data prefere?"
 PROMPT;
 ```
 
-### 6. Fluxo Atualizado no simulate-chat.php
+### 5. Log de Debug Melhorado
 
 ```php
-// Após processar com OpenAI, atualiza o estado
-if ($result['success']) {
-    // Extrai dados da mensagem do cliente
-    $newData = $openai->extractDataFromMessage($message, $collectedData);
-    
-    // Se houve function call de createAppointment com sucesso
-    if ($result['function_calls']) {
-        foreach ($result['function_calls'] as $call) {
-            if ($call['function'] === 'createAppointment' && $call['result']['success']) {
-                // Limpa estado após sucesso
-                $collectedData = ['procedure' => null, 'date' => null, ...];
-            }
-        }
-    }
-    
-    $conversationContext['collected_data'] = $newData;
-}
+error_log("===== MENSAGEM DO CLIENTE =====");
+error_log($message);
+error_log("===== DADOS EXTRAÍDOS =====");
+error_log(json_encode($extractedData));
+error_log("===== STEP CALCULADO =====");
+error_log($currentStep);
 ```
 
 ---
 
-## Mudanças nos Parâmetros OpenAI
-
-| Parâmetro | Antes | Depois | Motivo |
-|-----------|-------|--------|--------|
-| `temperature` | 0.3 | 0.2 | Mais determinístico |
-| `max_tokens` | 500 | 300 | Respostas mais curtas |
-| `model` | gpt-4o-mini | gpt-4o-mini | Manter (custo) |
-
----
-
-## Exemplo de Conversa Esperada
+## Fluxo Corrigido
 
 ```text
-Sessão inicia:
-collected_data = {procedure: null, date: null, time: null, patient_name: null}
-
 Cliente: "oi"
-→ IA detecta: nenhum dado
-→ Próximo passo: saudação
-→ IA: "Olá! Sou Ana da Clínica. Como posso ajudar?"
+→ extractDataFromMessage: nenhum dado
+→ currentStep: "greeting"
+→ IA: "Olá! Como posso ajudar?"
 
-Cliente: "quero agendar consulta"
-→ IA detecta: intenção de agendar
-→ collected_data = {procedure: "Consulta", ...}
-→ Próximo passo: perguntar data
-→ IA: "Para qual data você prefere?"
+Cliente: "estou com dor no siso e queria marcar"
+→ extractDataFromMessage: detecta "dor" → procedure = "Consulta"
+→ currentStep: "date"
+→ IA: "Vou agendar uma consulta para você. Para qual data prefere?"
 
-Cliente: "amanhã"
-→ extractDataFromMessage detecta "amanhã"
-→ collected_data = {procedure: "Consulta", date: "2026-01-28", ...}
-→ Próximo passo: mostrar horários
-→ IA chama checkAvailability
-→ IA: "Temos 09:00, 10:00, 14:00. Qual prefere?"
-
-Cliente: "14h"
-→ extractDataFromMessage detecta "14:00"
-→ collected_data = {..., time: "14:00", patient_name: null}
-→ Próximo passo: perguntar nome
-→ IA: "Para finalizar, qual seu nome completo?"
+Cliente: "30/01 às 10h"
+→ extractDataFromMessage: date = "2026-01-30", time = "10:00"
+→ currentStep: "name" (procedure, date, time preenchidos)
+→ IA: "Perfeito! Para finalizar, qual seu nome completo?"
 
 Cliente: "João Silva"
-→ extractDataFromMessage detecta nome
-→ collected_data = {..., patient_name: "João Silva"}
-→ Próximo passo: confirmar
+→ extractDataFromMessage: patient_name = "João Silva"
+→ currentStep: "confirm"
 → IA chama createAppointment
-→ IA: "Pronto! Consulta agendada: 28/01/2026 às 14:00 para João Silva."
+→ IA: "Consulta agendada para 30/01/2026 às 10:00 para João Silva. Até lá!"
 ```
-
----
-
-## Testes de Validação
-
-1. Enviar "oi" → saudação
-2. Enviar "quero agendar" → pergunta procedimento
-3. Enviar "consulta" → pergunta data
-4. Enviar "amanhã" → mostra horários
-5. Enviar "10h" → pergunta nome
-6. Enviar "João Silva" → confirma agendamento
-7. Verificar se cada resposta é curta (1-2 frases)
-8. Verificar se não há perguntas repetidas
 
 ---
 
 ## Resumo das Mudanças
 
-| Mudança | Impacto |
-|---------|---------|
-| Estado explícito (`collected_data`) | IA sabe exatamente o que já tem |
-| Extração automática de dados | Detecta informações sem depender só da IA |
-| Próximo passo calculado | IA sempre sabe o que fazer |
-| Prompt 60% menor | Menos confusão para o modelo |
-| Respostas limitadas a 300 tokens | Mais objetivas |
+| Mudança | Motivo |
+|---------|--------|
+| Sintomas → Consulta | Cliente descreveu problema, não procedimento |
+| Aliases de procedimentos | "canal" → "Tratamento de Canal" |
+| Atualizar collected_data no retorno | Estado não estava persistindo |
+| Prompt anti-alucinação | Regras mais rígidas para evitar invenção |
+| Logs de debug | Facilitar troubleshooting |
+
+---
+
+## Testes de Validação
+
+1. "oi" → saudação simples
+2. "estou com dor no siso" → pergunta data (não sugere canal)
+3. "quero fazer canal" → pergunta data (reconhece o procedimento)
+4. "30/01 às 10h" → pergunta nome (não repete pergunta de procedimento)
+5. "João Silva" → confirma agendamento
+6. Verificar logs para ver estado em cada passo
 
