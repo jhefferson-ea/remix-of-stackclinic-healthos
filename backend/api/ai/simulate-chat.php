@@ -14,6 +14,10 @@ require_once __DIR__ . '/../services/OpenAIService.php';
 
 $method = $_SERVER['REQUEST_METHOD'];
 
+// Debug temporário - verificar método recebido
+error_log("simulate-chat.php - Method: " . $method);
+error_log("simulate-chat.php - URI: " . $_SERVER['REQUEST_URI']);
+
 // ==================== DELETE: Limpar sessão ====================
 if ($method === 'DELETE') {
     $auth = Tenant::getAuthUser();
@@ -24,6 +28,7 @@ if ($method === 'DELETE') {
     
     if (!$sessionPhone) {
         Response::badRequest('session_phone é obrigatório');
+        exit;
     }
     
     try {
@@ -51,16 +56,20 @@ if ($method === 'DELETE') {
         ]);
         
         Response::success(['cleared' => true]);
+        exit;
         
     } catch (Exception $e) {
         error_log("Simulate Chat Clear Error: " . $e->getMessage());
         Response::serverError('Erro ao limpar sessão');
+        exit;
     }
 }
 
 // ==================== POST: Processar mensagem ====================
 if ($method !== 'POST') {
+    error_log("simulate-chat.php - Rejeitando método: " . $method);
     Response::methodNotAllowed();
+    exit;
 }
 
 $auth = Tenant::getAuthUser();
