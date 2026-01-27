@@ -20,6 +20,7 @@ import {
 } from '@/components/ui/select';
 import { api } from '@/services/api';
 import { useToast } from '@/hooks/use-toast';
+import ChatSimulator from '@/components/whatsapp/ChatSimulator';
 
 interface WhatsAppStatus {
   connected: boolean;
@@ -238,6 +239,9 @@ export default function WhatsAppConfig() {
           Atualizar
         </Button>
       </div>
+      
+      {/* Chat Simulator - Temporary for Testing */}
+      <ChatSimulator />
       
       {/* Status Card */}
       <Card>

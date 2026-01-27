@@ -76,6 +76,7 @@ $routes = [
     '/api/ai/reject-slot' => 'ai/reject-slot.php',
     '/api/ai/config' => 'ai/config.php',
     '/api/ai/live-chats' => 'ai/live-chats.php',
+    '/api/ai/simulate-chat' => 'ai/simulate-chat.php',
     '/api/ai/takeover' => 'ai/takeover.php',
     
     // Patient routes (base)

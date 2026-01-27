@@ -564,6 +564,28 @@ class ApiService {
     });
   }
 
+  // ==================== CHAT SIMULATOR ====================
+  async simulateChat(data: { message: string; session_phone?: string }) {
+    return this.request<{
+      response: string;
+      session_phone: string;
+      patient: { id: number; name: string; phone: string; is_lead: number };
+      tokens_used: number;
+      function_calls?: Array<{ function: string; arguments: Record<string, unknown>; result: Record<string, unknown> }>;
+      appointment_created?: { date: string; time: string; procedure?: string };
+    }>('/ai/simulate-chat', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async clearSimulatorSession(sessionPhone: string) {
+    return this.request<{ cleared: boolean }>('/ai/simulate-chat', {
+      method: 'DELETE',
+      body: JSON.stringify({ session_phone: sessionPhone }),
+    });
+  }
+
   async uploadLogo(file: File) {
     const formData = new FormData();
     formData.append('logo', file);
