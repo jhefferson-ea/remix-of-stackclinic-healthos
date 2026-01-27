@@ -1,0 +1,34 @@
+# StackClinic SPA Routing
+# Redireciona todas as rotas para index.html
+
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteBase /
+  
+  # Não reescrever arquivos e diretórios existentes
+  RewriteCond %{REQUEST_FILENAME} !-f
+  RewriteCond %{REQUEST_FILENAME} !-d
+  
+  # Não reescrever chamadas de API
+  RewriteCond %{REQUEST_URI} !^/api/
+  
+  # Não reescrever uploads
+  RewriteCond %{REQUEST_URI} !^/uploads/
+  
+  # Redireciona tudo para index.html
+  RewriteRule ^(.*)$ /index.html [L,QSA]
+</IfModule>
+
+# Desabilita listagem de diretório
+Options -Indexes
+
+# Cache para assets estáticos
+<IfModule mod_expires.c>
+  ExpiresActive On
+  ExpiresByType image/jpeg "access plus 1 month"
+  ExpiresByType image/png "access plus 1 month"
+  ExpiresByType image/gif "access plus 1 month"
+  ExpiresByType image/webp "access plus 1 month"
+  ExpiresByType text/css "access plus 1 week"
+  ExpiresByType application/javascript "access plus 1 week"
+</IfModule>

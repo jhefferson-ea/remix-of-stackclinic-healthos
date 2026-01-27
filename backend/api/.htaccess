@@ -1,0 +1,60 @@
+# StackClinic API - Apache Rewrite Rules
+# Coloque este arquivo em: public_html/api/.htaccess
+
+# Evolution API Config - ATUALIZE A URL DO NGROK QUANDO MUDAR
+SetEnv EVOLUTION_API_URL "https://b59ebe4aa6a0.ngrok-free.app"
+SetEnv EVOLUTION_API_KEY "stackclinic123"
+
+# CORS Headers - MUST be first
+<IfModule mod_headers.c>
+    Header always set Access-Control-Allow-Origin "*"
+    Header always set Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS"
+    Header always set Access-Control-Allow-Headers "Content-Type, Authorization, X-Requested-With"
+    Header always set Access-Control-Max-Age "3600"
+</IfModule>
+
+# Handle OPTIONS requests immediately (preflight)
+RewriteEngine On
+RewriteCond %{REQUEST_METHOD} OPTIONS
+RewriteRule ^(.*)$ $1 [R=200,L]
+
+# Pass Authorization header to PHP (LiteSpeed/FastCGI/CGI compatibility)
+SetEnvIfNoCase Authorization "(.+)" HTTP_AUTHORIZATION=$1
+RewriteCond %{HTTP:Authorization} .
+RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteBase /api/
+
+    # Skip rewrite for actual files and directories
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteCond %{REQUEST_FILENAME} !-d
+    RewriteRule ^(.*)$ index.php [QSA,L]
+</IfModule>
+
+# Bloquear acesso direto a arquivos de configuração
+<Files "Database.php">
+    Order Allow,Deny
+    Deny from all
+</Files>
+
+<Files "*.log">
+    Order Allow,Deny
+    Deny from all
+</Files>
+
+# Configurar PHP
+<IfModule mod_php.c>
+    php_value upload_max_filesize 20M
+    php_value post_max_size 20M
+    php_value max_execution_time 60
+    php_flag display_errors Off
+    php_flag log_errors On
+</IfModule>
+
+# Compressão Gzip
+<IfModule mod_deflate.c>
+    AddOutputFilterByType DEFLATE application/json
+    AddOutputFilterByType DEFLATE text/plain
+</IfModule>

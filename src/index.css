@@ -1,0 +1,244 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+
+@layer base {
+  :root {
+    /* StackClinic Design System - Healthcare Theme */
+    --background: 210 20% 98%;
+    --foreground: 215 25% 15%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 215 25% 15%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 215 25% 15%;
+
+    /* Primary: Deep Teal - Trust & Healthcare */
+    --primary: 173 58% 39%;
+    --primary-foreground: 0 0% 100%;
+
+    /* Secondary: Warm Coral - CTAs & Actions */
+    --secondary: 15 85% 60%;
+    --secondary-foreground: 0 0% 100%;
+
+    /* Muted: Soft Gray-Blue */
+    --muted: 210 15% 95%;
+    --muted-foreground: 215 15% 45%;
+
+    /* Accent: Light Teal */
+    --accent: 173 45% 92%;
+    --accent-foreground: 173 58% 30%;
+
+    /* Status Colors */
+    --success: 152 60% 45%;
+    --success-foreground: 0 0% 100%;
+    
+    --warning: 38 95% 55%;
+    --warning-foreground: 38 95% 15%;
+    
+    --destructive: 0 72% 55%;
+    --destructive-foreground: 0 0% 100%;
+
+    /* Info */
+    --info: 205 85% 55%;
+    --info-foreground: 0 0% 100%;
+
+    --border: 210 20% 90%;
+    --input: 210 20% 90%;
+    --ring: 173 58% 39%;
+
+    --radius: 0.75rem;
+
+    /* Gradients */
+    --gradient-primary: linear-gradient(135deg, hsl(173 58% 39%) 0%, hsl(173 65% 32%) 100%);
+    --gradient-secondary: linear-gradient(135deg, hsl(15 85% 60%) 0%, hsl(15 90% 50%) 100%);
+    --gradient-card: linear-gradient(180deg, hsl(0 0% 100%) 0%, hsl(210 20% 98%) 100%);
+    --gradient-hero: linear-gradient(135deg, hsl(173 58% 39%) 0%, hsl(195 70% 45%) 50%, hsl(205 75% 50%) 100%);
+
+    /* Shadows */
+    --shadow-sm: 0 1px 2px 0 hsl(215 25% 15% / 0.05);
+    --shadow-md: 0 4px 6px -1px hsl(215 25% 15% / 0.08), 0 2px 4px -2px hsl(215 25% 15% / 0.05);
+    --shadow-lg: 0 10px 15px -3px hsl(215 25% 15% / 0.08), 0 4px 6px -4px hsl(215 25% 15% / 0.05);
+    --shadow-xl: 0 20px 25px -5px hsl(215 25% 15% / 0.1), 0 8px 10px -6px hsl(215 25% 15% / 0.05);
+    --shadow-glow: 0 0 20px hsl(173 58% 39% / 0.3);
+
+    /* Sidebar */
+    --sidebar-background: 215 25% 15%;
+    --sidebar-foreground: 210 20% 95%;
+    --sidebar-primary: 173 58% 50%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 215 25% 22%;
+    --sidebar-accent-foreground: 210 20% 95%;
+    --sidebar-border: 215 25% 25%;
+    --sidebar-ring: 173 58% 50%;
+  }
+
+  .dark {
+    --background: 215 25% 10%;
+    --foreground: 210 20% 95%;
+
+    --card: 215 25% 14%;
+    --card-foreground: 210 20% 95%;
+
+    --popover: 215 25% 14%;
+    --popover-foreground: 210 20% 95%;
+
+    --primary: 173 58% 50%;
+    --primary-foreground: 215 25% 10%;
+
+    --secondary: 15 80% 55%;
+    --secondary-foreground: 0 0% 100%;
+
+    --muted: 215 25% 20%;
+    --muted-foreground: 210 15% 60%;
+
+    --accent: 173 40% 20%;
+    --accent-foreground: 173 58% 70%;
+
+    --success: 152 55% 50%;
+    --warning: 38 90% 50%;
+    --destructive: 0 65% 50%;
+
+    --border: 215 25% 22%;
+    --input: 215 25% 22%;
+    --ring: 173 58% 50%;
+
+    --gradient-primary: linear-gradient(135deg, hsl(173 58% 50%) 0%, hsl(173 65% 40%) 100%);
+    --gradient-card: linear-gradient(180deg, hsl(215 25% 14%) 0%, hsl(215 25% 12%) 100%);
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-family: 'Inter', system-ui, sans-serif;
+  }
+}
+
+@layer components {
+  .glass-card {
+    @apply bg-card/80 backdrop-blur-md border border-border/50;
+    box-shadow: var(--shadow-md);
+  }
+
+  .glow-effect {
+    box-shadow: var(--shadow-glow);
+  }
+
+  .gradient-primary {
+    background: var(--gradient-primary);
+  }
+
+  .gradient-secondary {
+    background: var(--gradient-secondary);
+  }
+
+  .gradient-hero {
+    background: var(--gradient-hero);
+  }
+
+  .status-confirmed {
+    @apply bg-success/15 text-success border-success/30;
+  }
+
+  .status-pending {
+    @apply bg-warning/15 text-warning border-warning/30;
+  }
+
+  .status-cancelled {
+    @apply bg-destructive/15 text-destructive border-destructive/30;
+  }
+
+  .kpi-card {
+    @apply relative overflow-hidden rounded-xl bg-card p-6 transition-all duration-300 hover:shadow-lg;
+    box-shadow: var(--shadow-md);
+  }
+
+  .kpi-card::before {
+    content: '';
+    @apply absolute inset-0 opacity-0 transition-opacity duration-300;
+    background: var(--gradient-primary);
+  }
+
+  .kpi-card:hover::before {
+    @apply opacity-5;
+  }
+
+  .sidebar-item {
+    @apply flex items-center gap-3 px-4 py-3 rounded-lg text-sidebar-foreground/70 transition-all duration-200;
+  }
+
+  .sidebar-item:hover {
+    @apply bg-sidebar-accent text-sidebar-foreground;
+  }
+
+  .sidebar-item.active {
+    @apply bg-sidebar-primary/20 text-sidebar-primary;
+  }
+
+  .animate-fade-in {
+    animation: fadeIn 0.3s ease-out;
+  }
+
+  .animate-slide-up {
+    animation: slideUp 0.4s ease-out;
+  }
+
+  .animate-pulse-subtle {
+    animation: pulseSoft 2s ease-in-out infinite;
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulseSoft {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.7;
+  }
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-muted/50 rounded-full;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-muted-foreground/30 rounded-full transition-colors;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-muted-foreground/50;
+}
