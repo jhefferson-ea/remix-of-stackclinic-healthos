@@ -200,6 +200,41 @@ class ApiService {
     });
   }
 
+  // ==================== PROFESSIONALS ====================
+  async getProfessionals() {
+    return this.request<{ id: number; name: string; email: string; specialty?: string; color?: string; role: string }[]>('/team/professionals');
+  }
+
+  async getProfessionalProcedures(professionalId: number) {
+    return this.request<{
+      professional: { id: number; name: string; role: string };
+      procedures: { id: number; name: string; price: number; duration: number; assigned: boolean }[];
+    }>(`/team/${professionalId}/procedures`);
+  }
+
+  async updateProfessionalProcedures(professionalId: number, procedureIds: number[]) {
+    return this.request<{ assigned_count: number }>(`/team/${professionalId}/procedures`, {
+      method: 'POST',
+      body: JSON.stringify({ procedure_ids: procedureIds }),
+    });
+  }
+
+  async getProfessionalSchedule(professionalId: number) {
+    return this.request<{
+      professional: { id: number; name: string; role: string };
+      schedule: { id: number; day: number; day_name: string; open: string; close: string; active: boolean }[];
+      clinic_schedule: { day: number; day_name: string; open: string; close: string; active: boolean }[];
+      has_custom_schedule: boolean;
+    }>(`/team/${professionalId}/schedule`);
+  }
+
+  async updateProfessionalSchedule(professionalId: number, data: { schedule?: { day: number; open: string; close: string; active: boolean }[]; use_clinic_schedule?: boolean }) {
+    return this.request<{ days_configured?: number; use_clinic_schedule?: boolean }>(`/team/${professionalId}/schedule`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
   // ==================== PATIENTS (Extended) ====================
   async createPatient(data: { name: string; phone: string; cpf?: string; email?: string }) {
     return this.request<{ id: number; name: string; phone: string }>('/patients/create', {
@@ -266,9 +301,12 @@ class ApiService {
   }
 
   // ==================== AGENDA ====================
-  async getAppointments(date?: string) {
-    const query = date ? `?date=${date}` : '';
-    return this.request<Appointment[]>(`/appointments/${query}`);
+  async getAppointments(date?: string, professionalId?: number) {
+    const params = new URLSearchParams();
+    if (date) params.append('date', date);
+    if (professionalId) params.append('professional_id', professionalId.toString());
+    const query = params.toString() ? `?${params.toString()}` : '';
+    return this.request<{ appointments: Appointment[]; blocks: Block[] }>(`/appointments/${query}`);
   }
 
   async createAppointment(data: CreateAppointmentData) {
@@ -429,8 +467,9 @@ class ApiService {
   }
 
   // ==================== FINANCEIRO ====================
-  async getFinancialSummary() {
-    return this.request<FinancialSummary>('/finance/summary');
+  async getFinancialSummary(professionalId?: number) {
+    const query = professionalId ? `?professional_id=${professionalId}` : '';
+    return this.request<FinancialSummary>(`/finance/summary${query}`);
   }
 
   async getCashFlow(period: 'week' | 'month' | 'year') {
@@ -774,6 +813,20 @@ export interface Appointment {
   status: 'confirmed' | 'pending' | 'cancelled';
   procedure: string;
   notes?: string;
+  professional_id?: number | null;
+  professional_name?: string | null;
+  professional_color?: string | null;
+}
+
+export interface Block {
+  id: number;
+  title: string;
+  day_of_week?: number | null;
+  start_time: string;
+  end_time: string;
+  recurring: boolean;
+  specific_date?: string | null;
+  usuario_id?: number | null;
 }
 
 export interface CreateAppointmentData {
@@ -783,6 +836,7 @@ export interface CreateAppointmentData {
   duration: number;
   procedure: string;
   procedimento_id?: number;
+  usuario_id?: number;
   notes?: string;
 }
 

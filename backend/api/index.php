@@ -37,6 +37,7 @@ $routes = [
     
     // Team routes
     '/api/team/update' => 'team/update.php',
+    '/api/team/professionals' => 'team/professionals.php',
     '/api/team' => 'team/index.php',
     
     // Patient routes
@@ -122,7 +123,11 @@ foreach ($routes as $route => $file) {
 }
 
 // Dynamic routes with regex
-if (preg_match('/\/api\/appointments\/(\d+)\/conversation/', $uri)) {
+if (preg_match('/\/api\/team\/(\d+)\/procedures/', $uri)) {
+    require_once __DIR__ . '/team/procedures.php';
+} elseif (preg_match('/\/api\/team\/(\d+)\/schedule/', $uri)) {
+    require_once __DIR__ . '/team/schedule.php';
+} elseif (preg_match('/\/api\/appointments\/(\d+)\/conversation/', $uri)) {
     require_once __DIR__ . '/appointments/conversation.php';
 } elseif (preg_match('/\/api\/appointments\/(\d+)/', $uri)) {
     require_once __DIR__ . '/appointments/detail.php';

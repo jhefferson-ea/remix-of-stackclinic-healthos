@@ -63,6 +63,7 @@ try {
     $endTime = $data['end_time'] ?? '';
     $recurring = (bool)($data['recurring'] ?? false);
     $specificDate = $data['specific_date'] ?? null;
+    $usuarioId = isset($data['usuario_id']) ? (int)$data['usuario_id'] : null;
 
     if (empty($title)) {
         Response::badRequest('Título é obrigatório');
@@ -78,14 +79,15 @@ try {
         // Create recurring blocks for each selected day
         foreach ($days as $day) {
             $stmt = $db->prepare("
-                INSERT INTO bloqueios_agenda (title, day_of_week, start_time, end_time, recurring, clinica_id) 
-                VALUES (:title, :day, :start, :end, 1, :clinica_id)
+                INSERT INTO bloqueios_agenda (title, day_of_week, start_time, end_time, recurring, usuario_id, clinica_id) 
+                VALUES (:title, :day, :start, :end, 1, :usuario_id, :clinica_id)
             ");
             $stmt->execute([
                 ':title' => $title,
                 ':day' => (int)$day,
                 ':start' => $startTime,
                 ':end' => $endTime,
+                ':usuario_id' => $usuarioId,
                 ':clinica_id' => $clinicaId
             ]);
             $createdBlocks[] = [
@@ -94,20 +96,22 @@ try {
                 'day_of_week' => (int)$day,
                 'start_time' => $startTime,
                 'end_time' => $endTime,
-                'recurring' => true
+                'recurring' => true,
+                'usuario_id' => $usuarioId
             ];
         }
     } elseif (!empty($specificDate)) {
         // Create single day block
         $stmt = $db->prepare("
-            INSERT INTO bloqueios_agenda (title, specific_date, start_time, end_time, recurring, clinica_id) 
-            VALUES (:title, :date, :start, :end, 0, :clinica_id)
+            INSERT INTO bloqueios_agenda (title, specific_date, start_time, end_time, recurring, usuario_id, clinica_id) 
+            VALUES (:title, :date, :start, :end, 0, :usuario_id, :clinica_id)
         ");
         $stmt->execute([
             ':title' => $title,
             ':date' => $specificDate,
             ':start' => $startTime,
             ':end' => $endTime,
+            ':usuario_id' => $usuarioId,
             ':clinica_id' => $clinicaId
         ]);
         $createdBlocks[] = [
@@ -116,7 +120,8 @@ try {
             'specific_date' => $specificDate,
             'start_time' => $startTime,
             'end_time' => $endTime,
-            'recurring' => false
+            'recurring' => false,
+            'usuario_id' => $usuarioId
         ];
     } else {
         Response::badRequest('Selecione dias da semana para bloqueio recorrente ou uma data específica');
