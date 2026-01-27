@@ -3,11 +3,15 @@
  * StackClinic - OpenAI Service
  * Processamento de mensagens com GPT e Function Calling
  * 
+ * ARQUITETURA: Estado Explícito + Prompt Enxuto
+ * - collected_data: O que já foi coletado na conversa
+ * - current_step: Em qual passo da máquina de estados estamos
+ * - A IA recebe estado explícito, não precisa deduzir do histórico
+ * 
  * REGRAS DE NEGÓCIO:
  * - Agenda é POR CLÍNICA (não por profissional)
  * - Paciente só é criado ao CONFIRMAR agendamento
  * - Dados obrigatórios: procedimento + data + hora + nome completo
- * - IA só pode: informar valores/horários e agendar (restrito)
  */
 
 class OpenAIService {
@@ -18,30 +22,236 @@ class OpenAIService {
     private $paciente;
     
     public function __construct($db, $clinica, $paciente = null) {
-        // Use environment variable or fallback to direct key
         $this->apiKey = getenv('OPENAI_API_KEY') ?: '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';
         $this->db = $db;
         $this->clinica = $clinica;
         $this->paciente = $paciente;
     }
     
+    // ========================================
+    // EXTRAÇÃO AUTOMÁTICA DE DADOS
+    // ========================================
+    
     /**
-     * Processa uma mensagem e retorna a resposta da IA
+     * Extrai dados automaticamente da mensagem do usuário
+     * Detecta nomes, telefones, datas, horários, procedimentos
      */
-    public function processMessage($message, $conversationHistory = []) {
-        $systemMessage = $this->buildSystemMessage();
+    public function extractDataFromMessage($message, $currentData = []) {
+        $extracted = $currentData;
+        $messageLower = mb_strtolower(trim($message), 'UTF-8');
+        $messageOriginal = trim($message);
         
-        // LOG: Debug do prompt (comentar em produção)
-        error_log("===== OPENAI SYSTEM PROMPT =====");
-        error_log(substr($systemMessage, 0, 500) . "...");
-        error_log("===== HISTÓRICO (" . count($conversationHistory) . " mensagens) =====");
+        // ========================================
+        // 1. DETECTA PROCEDIMENTO (fuzzy match)
+        // ========================================
+        if (empty($extracted['procedure'])) {
+            $procedures = $this->getProcedures();
+            foreach ($procedures as $proc) {
+                $procNameLower = mb_strtolower($proc['name'], 'UTF-8');
+                // Match exato ou parcial
+                if (stripos($messageLower, $procNameLower) !== false || 
+                    similar_text($messageLower, $procNameLower) > strlen($procNameLower) * 0.6) {
+                    $extracted['procedure'] = $proc['name'];
+                    $extracted['procedure_id'] = $proc['id'] ?? null;
+                    $extracted['procedure_duration'] = $proc['duration'] ?? 30;
+                    break;
+                }
+            }
+            
+            // Keywords genéricas
+            if (empty($extracted['procedure'])) {
+                $keywords = [
+                    'consulta' => 'Consulta',
+                    'avaliação' => 'Avaliação',
+                    'retorno' => 'Retorno',
+                    'limpeza' => 'Limpeza',
+                    'check' => 'Check-up',
+                    'exame' => 'Exame'
+                ];
+                foreach ($keywords as $keyword => $procName) {
+                    if (stripos($messageLower, $keyword) !== false) {
+                        // Verifica se existe procedimento similar
+                        foreach ($procedures as $proc) {
+                            if (stripos(mb_strtolower($proc['name'], 'UTF-8'), $keyword) !== false) {
+                                $extracted['procedure'] = $proc['name'];
+                                $extracted['procedure_id'] = $proc['id'] ?? null;
+                                $extracted['procedure_duration'] = $proc['duration'] ?? 30;
+                                break 2;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // ========================================
+        // 2. DETECTA DATA
+        // ========================================
+        if (empty($extracted['date'])) {
+            $today = new DateTime();
+            
+            // "amanhã"
+            if (preg_match('/amanh[aã]/iu', $messageLower)) {
+                $extracted['date'] = (clone $today)->modify('+1 day')->format('Y-m-d');
+            }
+            // "depois de amanhã"
+            elseif (preg_match('/depois\s+de\s+amanh[aã]/iu', $messageLower)) {
+                $extracted['date'] = (clone $today)->modify('+2 days')->format('Y-m-d');
+            }
+            // "hoje"
+            elseif (preg_match('/\bhoje\b/iu', $messageLower)) {
+                $extracted['date'] = $today->format('Y-m-d');
+            }
+            // Dias da semana
+            elseif (preg_match('/(segunda|ter[çc]a|quarta|quinta|sexta|s[aá]bado|domingo)/iu', $messageLower, $m)) {
+                $daysMap = [
+                    'segunda' => 'Monday', 'terça' => 'Tuesday', 'terca' => 'Tuesday',
+                    'quarta' => 'Wednesday', 'quinta' => 'Thursday', 'sexta' => 'Friday',
+                    'sábado' => 'Saturday', 'sabado' => 'Saturday', 'domingo' => 'Sunday'
+                ];
+                $dayName = $daysMap[mb_strtolower($m[1], 'UTF-8')] ?? null;
+                if ($dayName) {
+                    $nextDay = new DateTime("next {$dayName}");
+                    $extracted['date'] = $nextDay->format('Y-m-d');
+                }
+            }
+            // "dia X" ou "X/Y" ou "X de mês"
+            elseif (preg_match('/dia\s+(\d{1,2})/iu', $messageLower, $m) ||
+                    preg_match('/(\d{1,2})\s*\/\s*(\d{1,2})/u', $messageLower, $m) ||
+                    preg_match('/(\d{1,2})\s+de\s+(janeiro|fevereiro|mar[çc]o|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro)/iu', $messageLower, $m)) {
+                
+                $day = (int)$m[1];
+                $month = isset($m[2]) ? (int)$m[2] : (int)$today->format('m');
+                $year = (int)$today->format('Y');
+                
+                // Se é nome do mês
+                if (isset($m[2]) && !is_numeric($m[2])) {
+                    $monthsMap = [
+                        'janeiro' => 1, 'fevereiro' => 2, 'março' => 3, 'marco' => 3,
+                        'abril' => 4, 'maio' => 5, 'junho' => 6, 'julho' => 7,
+                        'agosto' => 8, 'setembro' => 9, 'outubro' => 10,
+                        'novembro' => 11, 'dezembro' => 12
+                    ];
+                    $month = $monthsMap[mb_strtolower($m[2], 'UTF-8')] ?? (int)$today->format('m');
+                }
+                
+                // Se a data já passou neste ano, vai para o próximo
+                $dateCandidate = sprintf('%04d-%02d-%02d', $year, $month, $day);
+                if (strtotime($dateCandidate) < strtotime($today->format('Y-m-d'))) {
+                    $dateCandidate = sprintf('%04d-%02d-%02d', $year + 1, $month, $day);
+                }
+                
+                if (checkdate($month, $day, (int)substr($dateCandidate, 0, 4))) {
+                    $extracted['date'] = $dateCandidate;
+                }
+            }
+        }
+        
+        // ========================================
+        // 3. DETECTA HORÁRIO
+        // ========================================
+        if (empty($extracted['time'])) {
+            // "14h", "14:00", "14 horas", "às 14"
+            if (preg_match('/(\d{1,2})\s*[h:]\s*(\d{2})?/iu', $messageLower, $m) ||
+                preg_match('/[àa]s\s+(\d{1,2})/iu', $messageLower, $m)) {
+                $hour = (int)$m[1];
+                $min = isset($m[2]) ? (int)$m[2] : 0;
+                if ($hour >= 0 && $hour <= 23 && $min >= 0 && $min <= 59) {
+                    $extracted['time'] = sprintf('%02d:%02d', $hour, $min);
+                }
+            }
+        }
+        
+        // ========================================
+        // 4. DETECTA NOME (2+ palavras com maiúsculas)
+        // ========================================
+        if (empty($extracted['patient_name'])) {
+            // Padrão: Nome Sobrenome (2+ palavras começando com maiúscula)
+            if (preg_match('/^([A-ZÀ-ÚÇ][a-zà-úç]+(?:\s+[A-ZÀ-ÚÇa-zà-úç]+)+)$/u', $messageOriginal, $m)) {
+                $extracted['patient_name'] = trim($m[1]);
+            }
+            // Padrão: "meu nome é X" ou "me chamo X" ou "sou o/a X"
+            elseif (preg_match('/(?:meu\s+nome\s+[ée]|me\s+chamo|sou\s+o|sou\s+a|sou)\s+([A-ZÀ-ÚÇ][a-zà-úç]+(?:\s+[A-ZÀ-ÚÇa-zà-úç]+)*)/iu', $messageOriginal, $m)) {
+                $extracted['patient_name'] = trim($m[1]);
+            }
+        }
+        
+        // ========================================
+        // 5. DETECTA TELEFONE
+        // ========================================
+        if (empty($extracted['patient_phone'])) {
+            // Formatos: (11) 99999-9999, 11999999999, etc
+            if (preg_match('/\(?\d{2}\)?\s*\d{4,5}[-\s]?\d{4}/', $messageOriginal, $m)) {
+                $extracted['patient_phone'] = preg_replace('/\D/', '', $m[0]);
+            }
+        }
+        
+        return $extracted;
+    }
+    
+    /**
+     * Determina o passo atual baseado nos dados coletados
+     */
+    public function determineCurrentStep($collectedData) {
+        if (!empty($collectedData['patient_name']) && 
+            !empty($collectedData['date']) && 
+            !empty($collectedData['time']) && 
+            !empty($collectedData['procedure'])) {
+            return 'confirm';
+        }
+        if (!empty($collectedData['time'])) {
+            return 'name';
+        }
+        if (!empty($collectedData['date'])) {
+            return 'time';
+        }
+        if (!empty($collectedData['procedure'])) {
+            return 'date';
+        }
+        return 'greeting';
+    }
+    
+    /**
+     * Retorna instrução do próximo passo
+     */
+    private function getNextStepInstruction($collectedData) {
+        if (empty($collectedData['procedure'])) {
+            return "O cliente ainda não escolheu o procedimento. Pergunte qual procedimento deseja agendar.";
+        }
+        if (empty($collectedData['date'])) {
+            return "O cliente já escolheu o procedimento '{$collectedData['procedure']}'. Pergunte para qual data prefere.";
+        }
+        if (empty($collectedData['time'])) {
+            return "O cliente quer agendar para {$collectedData['date']}. Use checkAvailability para ver horários disponíveis e mostre as opções.";
+        }
+        if (empty($collectedData['patient_name'])) {
+            return "O cliente escolheu horário {$collectedData['time']}. Pergunte o nome completo para finalizar.";
+        }
+        return "TODOS OS DADOS COLETADOS! Use createAppointment para confirmar: {$collectedData['procedure']} em {$collectedData['date']} às {$collectedData['time']} para {$collectedData['patient_name']}.";
+    }
+    
+    // ========================================
+    // PROCESSAMENTO COM ESTADO
+    // ========================================
+    
+    /**
+     * Processa mensagem com estado explícito
+     */
+    public function processMessageWithState($message, $history, $collectedData, $currentStep) {
+        $systemMessage = $this->buildSystemMessageWithState($collectedData, $currentStep);
+        
+        // LOG: Debug
+        error_log("===== ESTADO ATUAL =====");
+        error_log("Step: {$currentStep}");
+        error_log("Dados: " . json_encode($collectedData));
         
         $messages = [
             ['role' => 'system', 'content' => $systemMessage]
         ];
         
-        // Adiciona histórico da conversa
-        foreach ($conversationHistory as $msg) {
+        // Adiciona apenas últimas 6 mensagens do histórico (3 trocas)
+        $recentHistory = array_slice($history, -6);
+        foreach ($recentHistory as $msg) {
             $messages[] = [
                 'role' => $msg['direction'] === 'incoming' ? 'user' : 'assistant',
                 'content' => $msg['message']
@@ -51,20 +261,19 @@ class OpenAIService {
         // Adiciona mensagem atual
         $messages[] = ['role' => 'user', 'content' => $message];
         
-        // Define as tools disponíveis (APENAS as necessárias)
+        // Define as tools disponíveis
         $tools = $this->getAvailableTools();
         
         // Faz a chamada para a OpenAI
         $response = $this->callOpenAI($messages, $tools);
         
-        // Verifica erros detalhados
         if (!$response || isset($response['error'])) {
             $errorMsg = $response['message'] ?? 'Falha ao conectar com a IA';
-            error_log("OpenAI Error Details: " . json_encode($response));
+            error_log("OpenAI Error: " . json_encode($response));
             return [
                 'success' => false,
                 'error' => $errorMsg,
-                'debug' => $response
+                'collected_data' => $collectedData
             ];
         }
         
@@ -72,192 +281,137 @@ class OpenAIService {
         $assistantMessage = $response['choices'][0]['message'] ?? null;
         
         if (isset($assistantMessage['tool_calls'])) {
-            // Processa as function calls
-            return $this->handleToolCalls($assistantMessage, $messages, $tools);
+            $result = $this->handleToolCalls($assistantMessage, $messages, $tools);
+            $result['collected_data'] = $collectedData;
+            return $result;
         }
         
         return [
             'success' => true,
             'response' => $assistantMessage['content'] ?? 'Desculpe, não consegui processar sua mensagem.',
             'tokens_used' => $response['usage']['total_tokens'] ?? 0,
-            'function_calls' => null
+            'function_calls' => null,
+            'collected_data' => $collectedData
         ];
     }
     
     /**
-     * Monta o system message com MÁQUINA DE ESTADOS para guiar a IA
+     * Monta system message COM ESTADO EXPLÍCITO (prompt enxuto)
      */
-    private function buildSystemMessage() {
-        // Dados da clínica (SOMENTE LEITURA - nunca alterar)
+    private function buildSystemMessageWithState($collectedData, $currentStep) {
         $clinicName = $this->clinica['name'] ?? 'Clínica';
-        $aiName = $this->clinica['ai_name'] ?? 'Atendente Virtual';
-        $category = $this->getCategoryLabel($this->clinica['category'] ?? 'outro');
+        $aiName = $this->clinica['ai_name'] ?? 'Atendente';
         $aiTone = $this->clinica['ai_tone'] ?? 'casual';
-        $customPrompt = $this->clinica['system_prompt_custom'] ?? '';
-        $address = $this->clinica['address'] ?? '';
-        $phone = $this->clinica['phone'] ?? '';
         
-        // Busca procedimentos da clínica
-        $procedures = $this->getProcedures();
-        $proceduresList = '';
-        if (empty($procedures)) {
-            $proceduresList = "- Consulta Geral: Preço a consultar\n";
-        } else {
-            foreach ($procedures as $proc) {
-                $proceduresList .= "- {$proc['name']}: R$ " . number_format($proc['price'], 2, ',', '.') . " ({$proc['duration']} min)\n";
-            }
-        }
-        
-        // Busca horários de funcionamento
-        $workingHours = $this->getWorkingHours();
-        
-        // Tom da conversa
-        $toneInstruction = match($aiTone) {
-            'formal' => 'Use linguagem formal e profissional. Trate o paciente por "senhor" ou "senhora".',
-            'empathetic' => 'Seja acolhedor e empático. Demonstre compreensão e cuidado com o paciente.',
-            default => 'Seja amigável e natural. Use uma linguagem acessível e descontraída.',
-        };
-        
-        // Data e hora atual
+        // Data/hora atual
         $currentDate = date('d/m/Y');
         $currentTime = date('H:i');
+        $currentDateISO = date('Y-m-d');
         $daysOfWeek = ['domingo', 'segunda-feira', 'terça-feira', 'quarta-feira', 'quinta-feira', 'sexta-feira', 'sábado'];
         $currentDayName = $daysOfWeek[date('w')];
         
+        // Busca procedimentos
+        $procedures = $this->getProcedures();
+        $proceduresList = empty($procedures) ? "- Consulta Geral: Preço a consultar\n" : '';
+        foreach ($procedures as $proc) {
+            $proceduresList .= "- {$proc['name']}: R$ " . number_format($proc['price'], 2, ',', '.') . " ({$proc['duration']} min)\n";
+        }
+        
+        // Estado explícito
+        $stateInfo = "
+# DADOS JÁ COLETADOS NESTA CONVERSA
+- Procedimento: " . ($collectedData['procedure'] ?? '❌ NÃO INFORMADO') . "
+- Data: " . ($collectedData['date'] ? date('d/m/Y', strtotime($collectedData['date'])) . " ({$collectedData['date']})" : '❌ NÃO INFORMADO') . "
+- Horário: " . ($collectedData['time'] ?? '❌ NÃO INFORMADO') . "
+- Nome do paciente: " . ($collectedData['patient_name'] ?? '❌ NÃO INFORMADO') . "
+
+# SEU PRÓXIMO PASSO (SIGA EXATAMENTE)
+" . $this->getNextStepInstruction($collectedData);
+
+        // Tom
+        $toneInstruction = match($aiTone) {
+            'formal' => 'Use linguagem formal. Trate por "senhor" ou "senhora".',
+            'empathetic' => 'Seja acolhedor e empático.',
+            default => 'Seja amigável e natural.',
+        };
+
         $systemPrompt = <<<PROMPT
-# IDENTIDADE
-Você é {$aiName}, atendente virtual da clínica {$clinicName}.
-Especialidade: {$category}
+Você é {$aiName}, atendente virtual da {$clinicName}.
 
-# DATA E HORA ATUAL
-Hoje: {$currentDate} ({$currentDayName})
-Agora: {$currentTime}
+HOJE: {$currentDate} ({$currentDayName}) | AGORA: {$currentTime}
 
-# INFORMAÇÕES DA CLÍNICA (NUNCA ALTERE ESTES DADOS)
-- Nome: {$clinicName}
-- Endereço: {$address}
-- Telefone: {$phone}
-
-# PROCEDIMENTOS DISPONÍVEIS (use exatamente estes nomes)
+PROCEDIMENTOS DISPONÍVEIS:
 {$proceduresList}
 
-# HORÁRIOS DE FUNCIONAMENTO
-{$workingHours}
+{$stateInfo}
 
-# TOM: {$toneInstruction}
+REGRAS ABSOLUTAS:
+1. Faça apenas UMA pergunta por mensagem
+2. Seja objetivo (máximo 2 frases curtas)
+3. Use checkAvailability ANTES de oferecer horários
+4. Só use createAppointment quando tiver TODOS os dados ✅
+5. NUNCA invente dados - use EXATAMENTE o que o cliente informou
+6. Se o cliente informou vários dados de uma vez, reconheça todos
 
-# FLUXO DE AGENDAMENTO (SIGA RIGOROSAMENTE ESTA ORDEM)
+INTERPRETAÇÃO DE DATAS:
+- "amanhã" → dia seguinte
+- "segunda", "terça" → próxima ocorrência do dia
+- "dia 15" → dia 15 deste mês (ou próximo)
+- Converta para formato YYYY-MM-DD ao chamar checkAvailability
 
-Você DEVE seguir EXATAMENTE esta sequência. NÃO pule passos:
+TOM: {$toneInstruction}
 
-**PASSO 1 - SAUDAÇÃO**
-Se o cliente mandou "oi", "olá", "bom dia", "boa tarde", "boa noite", etc:
-→ Responda: "Olá! Sou {$aiName} da {$clinicName}. Como posso ajudar?"
-→ PARE. Aguarde a resposta do cliente.
-
-**PASSO 2 - IDENTIFICAR INTENÇÃO**
-Se o cliente quer agendar mas NÃO disse qual procedimento:
-→ Pergunte: "Qual procedimento você gostaria de agendar?"
-→ Liste os procedimentos disponíveis se necessário.
-→ PARE. Aguarde a resposta.
-
-**PASSO 3 - DATA**
-Se o cliente JÁ escolheu o procedimento mas NÃO informou a data:
-→ Pergunte: "Para qual data você prefere?"
-→ Aceite: "amanhã", "segunda", "dia 15", datas específicas, etc.
-→ PARE. Aguarde a resposta.
-
-**PASSO 4 - VERIFICAR HORÁRIOS**
-Se o cliente informou a data:
-→ Use a função checkAvailability com a data (formato YYYY-MM-DD)
-→ Se não houver horários, informe e pergunte outra data
-→ Se houver, mostre NO MÁXIMO 5 horários
-→ Pergunte: "Qual horário prefere?"
-→ PARE. Aguarde a resposta.
-
-**PASSO 5 - NOME DO PACIENTE**
-Se o cliente escolheu o horário:
-→ Pergunte: "Para finalizar, preciso do seu nome completo."
-→ PARE. Aguarde a resposta.
-
-**PASSO 6 - CONFIRMAR AGENDAMENTO**
-SOMENTE quando você tiver TODOS os dados: procedimento + data + horário + nome completo:
-→ Use a função createAppointment com todos os dados
-→ Confirme: "Pronto! Agendamento confirmado: [procedimento] em [data] às [hora] para [nome]. Até lá!"
-
-# REGRAS ABSOLUTAS (NUNCA VIOLE)
-
-1. NUNCA pule passos - siga a ordem 1→2→3→4→5→6
-2. NUNCA faça duas perguntas na mesma mensagem
-3. NUNCA invente procedimentos, preços ou horários
-4. NUNCA chame createAppointment sem ter o NOME COMPLETO do cliente
-5. NUNCA altere dados da clínica (nome, endereço, etc.)
-6. Se não entendeu algo, peça para o cliente repetir
-7. Se o cliente pedir para falar com humano, use transferToHuman
-
-# INTERPRETAÇÃO DE DATAS
-
-- "amanhã" → dia seguinte ao atual
-- "segunda", "terça", etc → próximo dia da semana
-- "dia 15" → dia 15 do mês atual (ou próximo se já passou)
-- Converta SEMPRE para formato YYYY-MM-DD antes de chamar checkAvailability
-
-# EXEMPLOS DE INTERAÇÕES CORRETAS
-
-Exemplo 1 - Fluxo completo:
-Cliente: oi
-IA: Olá! Sou {$aiName} da {$clinicName}. Como posso ajudar?
-
-Cliente: quero agendar
-IA: Qual procedimento você gostaria de agendar?
-
-Cliente: limpeza
-IA: Ótimo! Para qual data você prefere a limpeza?
-
-Cliente: amanhã
-IA: [chama checkAvailability] Temos horários disponíveis amanhã: 09:00, 10:00, 14:00, 15:00 e 16:00. Qual prefere?
-
-Cliente: 14h
-IA: Perfeito! Para finalizar, preciso do seu nome completo.
-
-Cliente: João Silva
-IA: [chama createAppointment] Pronto! Agendamento confirmado: Limpeza em 28/01/2026 às 14:00 para João Silva. Até lá!
-
-Exemplo 2 - Cliente já sabe o que quer:
-Cliente: quero agendar limpeza para amanhã às 10h
-IA: [chama checkAvailability para verificar] Ótimo! O horário das 10:00 está disponível. Para confirmar, preciso do seu nome completo.
-
-Cliente: Maria Santos
-IA: [chama createAppointment] Pronto! Agendamento confirmado: Limpeza em 28/01/2026 às 10:00 para Maria Santos. Até lá!
-
-Exemplo 3 - Horário não disponível:
-Cliente: quero às 14h
-IA: [após checkAvailability mostrar que 14h não está disponível] Infelizmente o horário das 14:00 não está disponível. Temos: 09:00, 10:00, 15:00 e 16:00. Qual prefere?
-
-# INSTRUÇÕES ADICIONAIS
-{$customPrompt}
+IMPORTANTE: O sistema já detectou automaticamente os dados acima. Se algum dado está como "NÃO INFORMADO", você DEVE perguntar por ele seguindo a ordem: procedimento → data → horário → nome.
 PROMPT;
 
         return $systemPrompt;
     }
     
-    /**
-     * Define as tools (functions) disponíveis para a IA
-     * REMOVIDO: getPatientInfo (paciente só é criado ao confirmar)
-     */
+    // ========================================
+    // MÉTODO LEGADO (compatibilidade)
+    // ========================================
+    
+    public function processMessage($message, $conversationHistory = []) {
+        // Extrai dados da conversa atual
+        $collectedData = [
+            'procedure' => null,
+            'date' => null,
+            'time' => null,
+            'patient_name' => null,
+            'patient_phone' => null
+        ];
+        
+        // Tenta extrair dados de todo o histórico
+        foreach ($conversationHistory as $msg) {
+            if ($msg['direction'] === 'incoming') {
+                $collectedData = $this->extractDataFromMessage($msg['message'], $collectedData);
+            }
+        }
+        
+        // Extrai da mensagem atual
+        $collectedData = $this->extractDataFromMessage($message, $collectedData);
+        $currentStep = $this->determineCurrentStep($collectedData);
+        
+        return $this->processMessageWithState($message, $conversationHistory, $collectedData, $currentStep);
+    }
+    
+    // ========================================
+    // TOOLS (FUNCTION CALLING)
+    // ========================================
+    
     private function getAvailableTools() {
         return [
             [
                 'type' => 'function',
                 'function' => [
                     'name' => 'checkAvailability',
-                    'description' => 'Verifica horários disponíveis na agenda para uma data específica. Use SEMPRE antes de confirmar um horário.',
+                    'description' => 'Verifica horários disponíveis para uma data. Use SEMPRE antes de oferecer horários.',
                     'parameters' => [
                         'type' => 'object',
                         'properties' => [
                             'date' => [
                                 'type' => 'string',
-                                'description' => 'Data no formato YYYY-MM-DD (ex: 2026-01-28)'
+                                'description' => 'Data no formato YYYY-MM-DD'
                             ]
                         ],
                         'required' => ['date']
@@ -268,30 +422,15 @@ PROMPT;
                 'type' => 'function',
                 'function' => [
                     'name' => 'createAppointment',
-                    'description' => 'Cria um novo agendamento. IMPORTANTE: Só chame esta função quando tiver TODOS os dados: data, horário, procedimento e nome completo do paciente.',
+                    'description' => 'Cria agendamento. Só chame quando tiver TODOS: data, horário, procedimento e nome completo.',
                     'parameters' => [
                         'type' => 'object',
                         'properties' => [
-                            'date' => [
-                                'type' => 'string',
-                                'description' => 'Data no formato YYYY-MM-DD'
-                            ],
-                            'time' => [
-                                'type' => 'string',
-                                'description' => 'Horário no formato HH:MM (ex: 14:00)'
-                            ],
-                            'procedure_name' => [
-                                'type' => 'string',
-                                'description' => 'Nome do procedimento exatamente como listado'
-                            ],
-                            'patient_name' => [
-                                'type' => 'string',
-                                'description' => 'Nome completo do paciente (OBRIGATÓRIO)'
-                            ],
-                            'patient_phone' => [
-                                'type' => 'string',
-                                'description' => 'Telefone do paciente (opcional)'
-                            ]
+                            'date' => ['type' => 'string', 'description' => 'Data YYYY-MM-DD'],
+                            'time' => ['type' => 'string', 'description' => 'Horário HH:MM'],
+                            'procedure_name' => ['type' => 'string', 'description' => 'Nome do procedimento'],
+                            'patient_name' => ['type' => 'string', 'description' => 'Nome completo do paciente (OBRIGATÓRIO)'],
+                            'patient_phone' => ['type' => 'string', 'description' => 'Telefone (opcional)']
                         ],
                         'required' => ['date', 'time', 'procedure_name', 'patient_name']
                     ]
@@ -301,14 +440,11 @@ PROMPT;
                 'type' => 'function',
                 'function' => [
                     'name' => 'transferToHuman',
-                    'description' => 'Transfere a conversa para um atendente humano. Use quando o cliente solicitar ou quando a situação for muito complexa.',
+                    'description' => 'Transfere para atendente humano quando solicitado.',
                     'parameters' => [
                         'type' => 'object',
                         'properties' => [
-                            'reason' => [
-                                'type' => 'string',
-                                'description' => 'Motivo da transferência'
-                            ]
+                            'reason' => ['type' => 'string', 'description' => 'Motivo']
                         ],
                         'required' => ['reason']
                     ]
@@ -317,25 +453,19 @@ PROMPT;
         ];
     }
     
-    /**
-     * Processa as tool calls da IA
-     */
     private function handleToolCalls($assistantMessage, $messages, $tools) {
         $toolCalls = $assistantMessage['tool_calls'];
         $functionResults = [];
         
-        // Adiciona a mensagem do assistente com tool_calls
         $messages[] = $assistantMessage;
         
         foreach ($toolCalls as $toolCall) {
             $functionName = $toolCall['function']['name'];
             $arguments = json_decode($toolCall['function']['arguments'], true) ?? [];
             
-            // LOG: Debug das chamadas
             error_log("===== TOOL CALL: {$functionName} =====");
-            error_log("Arguments: " . json_encode($arguments));
+            error_log("Args: " . json_encode($arguments));
             
-            // Executa a função
             $result = $this->executeFunction($functionName, $arguments);
             
             error_log("Result: " . json_encode($result));
@@ -346,7 +476,6 @@ PROMPT;
                 'result' => $result
             ];
             
-            // Adiciona o resultado da função às mensagens
             $messages[] = [
                 'role' => 'tool',
                 'tool_call_id' => $toolCall['id'],
@@ -354,17 +483,14 @@ PROMPT;
             ];
         }
         
-        // Faz nova chamada para a IA processar os resultados
+        // Nova chamada para processar resultados
         $response = $this->callOpenAI($messages, $tools);
         
-        // Verifica erros detalhados na segunda chamada também
         if (!$response || isset($response['error'])) {
-            $errorMsg = $response['message'] ?? 'Falha ao processar resultados das funções';
-            error_log("OpenAI Tool Results Error: " . json_encode($response));
             return [
                 'success' => false,
-                'error' => $errorMsg,
-                'debug' => $response
+                'error' => $response['message'] ?? 'Falha ao processar resultados',
+                'function_calls' => $functionResults
             ];
         }
         
@@ -378,9 +504,6 @@ PROMPT;
         ];
     }
     
-    /**
-     * Executa uma função específica
-     */
     private function executeFunction($functionName, $arguments) {
         $clinicaId = $this->clinica['id'];
         
@@ -411,71 +534,38 @@ PROMPT;
     }
     
     // ========================================
-    // FUNÇÕES DE SANITIZAÇÃO (Segurança)
+    // SANITIZAÇÃO
     // ========================================
     
-    /**
-     * Sanitiza string removendo tags e caracteres perigosos
-     */
     private function sanitizeString($value) {
         if (!$value) return '';
         return trim(strip_tags($value));
     }
     
-    /**
-     * Sanitiza data para formato YYYY-MM-DD
-     */
     private function sanitizeDate($value) {
         if (!$value) return null;
-        
-        // Remove qualquer coisa que não seja número ou hífen
         $clean = preg_replace('/[^0-9\-]/', '', $value);
-        
-        // Valida formato
-        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $clean)) {
-            return null;
-        }
-        
-        // Valida se é uma data real
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $clean)) return null;
         $parts = explode('-', $clean);
-        if (!checkdate((int)$parts[1], (int)$parts[2], (int)$parts[0])) {
-            return null;
-        }
-        
+        if (!checkdate((int)$parts[1], (int)$parts[2], (int)$parts[0])) return null;
         return $clean;
     }
     
-    /**
-     * Sanitiza hora para formato HH:MM
-     */
     private function sanitizeTime($value) {
         if (!$value) return null;
-        
-        // Remove qualquer coisa que não seja número ou dois-pontos
         $clean = preg_replace('/[^0-9:]/', '', $value);
-        
-        // Valida formato
         if (!preg_match('/^\d{2}:\d{2}$/', $clean)) {
-            // Tenta corrigir formato "9:00" para "09:00"
             if (preg_match('/^(\d{1,2}):(\d{2})$/', $clean, $matches)) {
                 $clean = str_pad($matches[1], 2, '0', STR_PAD_LEFT) . ':' . $matches[2];
             } else {
                 return null;
             }
         }
-        
-        // Valida range (00:00 a 23:59)
         $parts = explode(':', $clean);
-        if ((int)$parts[0] > 23 || (int)$parts[1] > 59) {
-            return null;
-        }
-        
+        if ((int)$parts[0] > 23 || (int)$parts[1] > 59) return null;
         return $clean;
     }
     
-    /**
-     * Sanitiza telefone removendo tudo que não for número
-     */
     private function sanitizePhone($value) {
         if (!$value) return '';
         return preg_replace('/[^0-9]/', '', $value);
@@ -485,52 +575,32 @@ PROMPT;
     // FUNÇÕES DE NEGÓCIO
     // ========================================
     
-    /**
-     * Verifica horários disponíveis (considera bloqueios e agendamentos existentes)
-     */
     private function checkAvailability($date, $clinicaId) {
-        // Valida se data não é passada
         if (strtotime($date) < strtotime(date('Y-m-d'))) {
-            return [
-                'available' => false,
-                'message' => 'Não é possível agendar para datas passadas'
-            ];
+            return ['available' => false, 'message' => 'Não é possível agendar para datas passadas'];
         }
         
-        // Busca agendamentos existentes
+        // Agendamentos existentes
         $stmt = $this->db->prepare("
-            SELECT time, duration 
-            FROM agendamentos 
-            WHERE clinica_id = :clinica_id 
-            AND date = :date 
-            AND status NOT IN ('cancelled', 'no_show')
+            SELECT time, duration FROM agendamentos 
+            WHERE clinica_id = :clinica_id AND date = :date AND status NOT IN ('cancelled', 'no_show')
             ORDER BY time
         ");
         $stmt->execute([':clinica_id' => $clinicaId, ':date' => $date]);
         $appointments = $stmt->fetchAll();
         
-        // Busca bloqueios (específicos da data ou recorrentes)
+        // Bloqueios
         $dayOfWeek = date('w', strtotime($date));
         $stmt = $this->db->prepare("
-            SELECT start_time, end_time 
-            FROM bloqueios_agenda 
-            WHERE clinica_id = :clinica_id 
-            AND (
-                specific_date = :date 
-                OR (recurring = 1 AND day_of_week = :day_of_week)
-            )
+            SELECT start_time, end_time FROM bloqueios_agenda 
+            WHERE clinica_id = :clinica_id AND (specific_date = :date OR (recurring = 1 AND day_of_week = :day_of_week))
         ");
-        $stmt->execute([
-            ':clinica_id' => $clinicaId, 
-            ':date' => $date,
-            ':day_of_week' => $dayOfWeek
-        ]);
+        $stmt->execute([':clinica_id' => $clinicaId, ':date' => $date, ':day_of_week' => $dayOfWeek]);
         $blocks = $stmt->fetchAll();
         
-        // Busca horário de funcionamento do dia
+        // Horário de funcionamento
         $stmt = $this->db->prepare("
-            SELECT `open`, `close` 
-            FROM horario_funcionamento 
+            SELECT `open`, `close` FROM horario_funcionamento 
             WHERE clinica_id = :clinica_id AND day = :day_of_week AND active = 1
         ");
         $stmt->execute([':clinica_id' => $clinicaId, ':day_of_week' => $dayOfWeek]);
@@ -538,13 +608,10 @@ PROMPT;
         
         if (!$workingHours) {
             $daysName = ['domingo', 'segunda-feira', 'terça-feira', 'quarta-feira', 'quinta-feira', 'sexta-feira', 'sábado'];
-            return [
-                'available' => false,
-                'message' => "A clínica não funciona na {$daysName[$dayOfWeek]}"
-            ];
+            return ['available' => false, 'message' => "A clínica não funciona na {$daysName[$dayOfWeek]}"];
         }
         
-        // Gera slots disponíveis (a cada 30 minutos)
+        // Gera slots
         $availableSlots = [];
         $startTime = strtotime($workingHours['open']);
         $endTime = strtotime($workingHours['close']);
@@ -555,12 +622,8 @@ PROMPT;
             $timeStr = date('H:i', $startTime);
             $isAvailable = true;
             
-            // Se for hoje, não mostra horários passados
-            if ($isToday && $startTime <= $now) {
-                $isAvailable = false;
-            }
+            if ($isToday && $startTime <= $now) $isAvailable = false;
             
-            // Verifica se conflita com agendamento existente
             if ($isAvailable) {
                 foreach ($appointments as $apt) {
                     $aptStart = strtotime($apt['time']);
@@ -572,7 +635,6 @@ PROMPT;
                 }
             }
             
-            // Verifica se conflita com bloqueio
             if ($isAvailable) {
                 foreach ($blocks as $block) {
                     $blockStart = strtotime($block['start_time']);
@@ -584,23 +646,15 @@ PROMPT;
                 }
             }
             
-            if ($isAvailable) {
-                $availableSlots[] = $timeStr;
-            }
-            
-            $startTime += 1800; // 30 minutos
+            if ($isAvailable) $availableSlots[] = $timeStr;
+            $startTime += 1800;
         }
         
         if (empty($availableSlots)) {
-            return [
-                'available' => false,
-                'message' => 'Não há horários disponíveis nesta data. Gostaria de tentar outra data?'
-            ];
+            return ['available' => false, 'message' => 'Não há horários disponíveis nesta data. Gostaria de tentar outra data?'];
         }
         
-        // Formata a data para exibição
         $dateFormatted = date('d/m/Y', strtotime($date));
-        
         return [
             'available' => true,
             'date' => $date,
@@ -610,115 +664,59 @@ PROMPT;
         ];
     }
     
-    /**
-     * Cria um agendamento
-     * Cria paciente SOMENTE aqui (quando confirma agendamento)
-     */
     private function createAppointment($date, $time, $procedureName, $patientName, $patientPhone, $clinicaId) {
-        // ========================================
-        // VALIDAÇÕES
-        // ========================================
+        if (!$date) return ['success' => false, 'error' => 'Data inválida.'];
+        if (!$time) return ['success' => false, 'error' => 'Horário inválido.'];
+        if (strlen($patientName) < 3) return ['success' => false, 'error' => 'Nome do paciente é obrigatório.'];
         
-        if (!$date) {
-            return ['success' => false, 'error' => 'Data inválida. Use o formato correto.'];
-        }
-        
-        if (!$time) {
-            return ['success' => false, 'error' => 'Horário inválido. Use o formato HH:MM.'];
-        }
-        
-        if (strlen($patientName) < 3) {
-            return [
-                'success' => false, 
-                'error' => 'Nome do paciente é obrigatório. Por favor, pergunte o nome completo.'
-            ];
-        }
-        
-        // ========================================
-        // BUSCA PROCEDIMENTO
-        // ========================================
-        
+        // Busca procedimento
         $procedureId = null;
-        $duration = 30; // default
+        $duration = 30;
         $procedureNameFinal = $procedureName ?: 'Consulta';
         
         if ($procedureName) {
             $stmt = $this->db->prepare("
                 SELECT id, name, duration FROM procedimentos 
-                WHERE clinica_id = :clinica_id AND name LIKE :name AND active = 1
-                LIMIT 1
+                WHERE clinica_id = :clinica_id AND name LIKE :name AND active = 1 LIMIT 1
             ");
-            $stmt->execute([
-                ':clinica_id' => $clinicaId,
-                ':name' => '%' . $procedureName . '%'
-            ]);
+            $stmt->execute([':clinica_id' => $clinicaId, ':name' => '%' . $procedureName . '%']);
             $procedure = $stmt->fetch();
-            
             if ($procedure) {
                 $procedureId = $procedure['id'];
                 $duration = $procedure['duration'];
-                $procedureNameFinal = $procedure['name']; // Usa nome exato do banco
+                $procedureNameFinal = $procedure['name'];
             }
         }
         
-        // ========================================
-        // VERIFICA DISPONIBILIDADE (DUPLA CHECAGEM)
-        // ========================================
-        
+        // Verifica disponibilidade
         $availability = $this->checkAvailability($date, $clinicaId);
         if (!$availability['available']) {
-            return [
-                'success' => false,
-                'error' => $availability['message'] ?? 'Data não disponível'
-            ];
+            return ['success' => false, 'error' => $availability['message'] ?? 'Data não disponível'];
         }
-        
         if (!in_array($time, $availability['slots'] ?? [])) {
-            return [
-                'success' => false,
-                'error' => "Horário {$time} não está disponível. Horários livres: " . implode(', ', array_slice($availability['slots'], 0, 5))
-            ];
+            return ['success' => false, 'error' => "Horário {$time} não disponível. Horários livres: " . implode(', ', array_slice($availability['slots'], 0, 5))];
         }
         
-        // ========================================
-        // CRIA PACIENTE (se não existe)
-        // ========================================
-        
+        // Cria paciente
         if (!$this->paciente) {
-            // Usa telefone informado ou gera um temporário
             $phone = $patientPhone ?: ('WHATSAPP_' . time());
-            
             try {
                 $stmt = $this->db->prepare("
                     INSERT INTO pacientes (clinica_id, name, phone, is_lead, lead_source, created_at)
                     VALUES (:clinica_id, :name, :phone, 0, 'whatsapp_ia', NOW())
                 ");
-                $stmt->execute([
-                    ':clinica_id' => $clinicaId,
-                    ':name' => $patientName,
-                    ':phone' => $phone
-                ]);
-                
+                $stmt->execute([':clinica_id' => $clinicaId, ':name' => $patientName, ':phone' => $phone]);
                 $pacienteId = $this->db->lastInsertId();
-                $this->paciente = [
-                    'id' => $pacienteId,
-                    'name' => $patientName,
-                    'phone' => $phone
-                ];
-                
-                error_log("Paciente criado: ID {$pacienteId}, Nome: {$patientName}");
+                $this->paciente = ['id' => $pacienteId, 'name' => $patientName, 'phone' => $phone];
+                error_log("Paciente criado: ID {$pacienteId}");
             } catch (Exception $e) {
-                error_log("Erro ao criar paciente: " . $e->getMessage());
+                error_log("Erro paciente: " . $e->getMessage());
                 return ['success' => false, 'error' => 'Erro ao registrar paciente'];
             }
         }
         
-        // ========================================
-        // CRIA AGENDAMENTO
-        // ========================================
-        
+        // Cria agendamento
         try {
-            // NOTA: Agenda é por clínica, não por profissional (usuario_id = NULL)
             $stmt = $this->db->prepare("
                 INSERT INTO agendamentos (clinica_id, paciente_id, date, time, duration, `procedure`, procedimento_id, status, notes, created_at)
                 VALUES (:clinica_id, :paciente_id, :date, :time, :duration, :procedure, :procedimento_id, 'confirmed', 'Agendado via WhatsApp IA', NOW())
@@ -736,7 +734,7 @@ PROMPT;
             $appointmentId = $this->db->lastInsertId();
             $dateFormatted = date('d/m/Y', strtotime($date));
             
-            error_log("Agendamento criado: ID {$appointmentId}, Data: {$date}, Hora: {$time}");
+            error_log("Agendamento criado: ID {$appointmentId}");
             
             return [
                 'success' => true,
@@ -750,65 +748,45 @@ PROMPT;
                 'message' => "Agendamento confirmado: {$procedureNameFinal} em {$dateFormatted} às {$time} para {$this->paciente['name']}"
             ];
         } catch (Exception $e) {
-            error_log("Erro ao criar agendamento: " . $e->getMessage());
-            return ['success' => false, 'error' => 'Erro ao criar agendamento. Tente novamente.'];
+            error_log("Erro agendamento: " . $e->getMessage());
+            return ['success' => false, 'error' => 'Erro ao criar agendamento.'];
         }
     }
     
-    /**
-     * Transfere para atendente humano
-     */
     private function transferToHuman($reason) {
-        // Atualiza sessão para transferido
         if ($this->paciente) {
             try {
                 $stmt = $this->db->prepare("
-                    UPDATE whatsapp_sessions 
-                    SET transferred_to_human = 1, status = 'transferred'
+                    UPDATE whatsapp_sessions SET transferred_to_human = 1, status = 'transferred'
                     WHERE clinica_id = :clinica_id AND paciente_id = :paciente_id
                 ");
-                $stmt->execute([
-                    ':clinica_id' => $this->clinica['id'],
-                    ':paciente_id' => $this->paciente['id']
-                ]);
+                $stmt->execute([':clinica_id' => $this->clinica['id'], ':paciente_id' => $this->paciente['id']]);
             } catch (Exception $e) {
-                error_log("Erro ao transferir: " . $e->getMessage());
+                error_log("Erro transferir: " . $e->getMessage());
             }
         }
-        
         return [
             'success' => true,
             'transferred' => true,
             'reason' => $reason,
-            'message' => 'Conversa transferida para atendimento humano. Um atendente entrará em contato em breve.'
+            'message' => 'Conversa transferida para atendimento humano.'
         ];
     }
     
-    /**
-     * Busca procedimentos da clínica
-     */
-    private function getProcedures() {
+    public function getProcedures() {
         $stmt = $this->db->prepare("
-            SELECT name, price, duration 
-            FROM procedimentos 
-            WHERE clinica_id = :clinica_id AND active = 1
-            ORDER BY name
+            SELECT id, name, price, duration FROM procedimentos 
+            WHERE clinica_id = :clinica_id AND active = 1 ORDER BY name
         ");
         $stmt->execute([':clinica_id' => $this->clinica['id']]);
         return $stmt->fetchAll();
     }
     
-    /**
-     * Busca horários de funcionamento formatados
-     */
     private function getWorkingHours() {
         $days = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado'];
-        
         $stmt = $this->db->prepare("
-            SELECT day, `open`, `close`, active 
-            FROM horario_funcionamento 
-            WHERE clinica_id = :clinica_id
-            ORDER BY day
+            SELECT day, `open`, `close`, active FROM horario_funcionamento 
+            WHERE clinica_id = :clinica_id ORDER BY day
         ");
         $stmt->execute([':clinica_id' => $this->clinica['id']]);
         $hours = $stmt->fetchAll();
@@ -816,47 +794,32 @@ PROMPT;
         $formatted = '';
         foreach ($hours as $h) {
             if ($h['active']) {
-                $formatted .= $days[$h['day']] . ': ' . 
-                    substr($h['open'], 0, 5) . ' às ' . 
-                    substr($h['close'], 0, 5) . "\n";
+                $formatted .= $days[$h['day']] . ': ' . substr($h['open'], 0, 5) . ' às ' . substr($h['close'], 0, 5) . "\n";
             }
         }
-        
-        return $formatted ?: 'Horários não configurados. Entre em contato para mais informações.';
+        return $formatted ?: 'Horários não configurados.';
     }
     
-    /**
-     * Retorna label da categoria
-     */
     private function getCategoryLabel($category) {
         $labels = [
-            'nutricionista' => 'Nutrição',
-            'dentista' => 'Odontologia',
-            'psicologo' => 'Psicologia',
-            'dermatologista' => 'Dermatologia',
-            'pediatra' => 'Pediatria',
-            'fisioterapeuta' => 'Fisioterapia',
-            'oftalmologista' => 'Oftalmologia',
-            'cardiologista' => 'Cardiologia',
-            'esteticista' => 'Estética',
+            'nutricionista' => 'Nutrição', 'dentista' => 'Odontologia', 'psicologo' => 'Psicologia',
+            'dermatologista' => 'Dermatologia', 'pediatra' => 'Pediatria', 'fisioterapeuta' => 'Fisioterapia',
+            'oftalmologista' => 'Oftalmologia', 'cardiologista' => 'Cardiologia', 'esteticista' => 'Estética',
             'outro' => 'Saúde'
         ];
         return $labels[$category] ?? 'Saúde';
     }
     
-    /**
-     * Faz chamada para a API da OpenAI
-     */
     private function callOpenAI($messages, $tools = null) {
         $url = 'https://api.openai.com/v1/chat/completions';
         
         $data = [
             'model' => $this->model,
             'messages' => $messages,
-            'temperature' => 0.2,           // Baixa para consistência máxima
-            'max_tokens' => 400,            // Respostas curtas
-            'presence_penalty' => 0.1,      // Evita repetição de tópicos
-            'frequency_penalty' => 0.1      // Evita repetição de frases
+            'temperature' => 0.2,
+            'max_tokens' => 300,
+            'presence_penalty' => 0.1,
+            'frequency_penalty' => 0.1
         ];
         
         if ($tools) {
@@ -882,21 +845,13 @@ PROMPT;
         
         if ($error) {
             error_log("OpenAI cURL Error: " . $error);
-            return [
-                'error' => true,
-                'http_code' => 0,
-                'message' => 'Erro de conexão: ' . $error
-            ];
+            return ['error' => true, 'http_code' => 0, 'message' => 'Erro de conexão: ' . $error];
         }
         
         if ($httpCode !== 200) {
             error_log("OpenAI HTTP Error {$httpCode}: " . $response);
             $decoded = json_decode($response, true);
-            return [
-                'error' => true,
-                'http_code' => $httpCode,
-                'message' => $decoded['error']['message'] ?? "HTTP {$httpCode}: " . substr($response, 0, 200)
-            ];
+            return ['error' => true, 'http_code' => $httpCode, 'message' => $decoded['error']['message'] ?? "HTTP {$httpCode}"];
         }
         
         return json_decode($response, true);
