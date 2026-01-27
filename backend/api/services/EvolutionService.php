@@ -377,7 +377,8 @@ class EvolutionService {
         
         $headers = [
             'Content-Type: application/json',
-            'Accept: application/json'
+            'Accept: application/json',
+            'ngrok-skip-browser-warning: true'  // Bypass ngrok free tier warning page
         ];
         
         if ($this->apiKey) {
