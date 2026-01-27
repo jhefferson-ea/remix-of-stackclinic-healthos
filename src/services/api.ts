@@ -576,9 +576,13 @@ class ApiService {
   }
 
   // ==================== PROCEDURE PAYMENTS ====================
-  async getProcedurePayments(filters?: { date?: string; status?: string; period?: string }) {
-    const params = new URLSearchParams(filters as Record<string, string>).toString();
-    return this.request<ProcedurePayment[]>(`/finance/procedure-payments/?${params}`);
+  async getProcedurePayments(filters?: { date?: string; status?: string; period?: string; professional_id?: number }) {
+    const params = new URLSearchParams();
+    if (filters?.date) params.append('date', filters.date);
+    if (filters?.status) params.append('status', filters.status);
+    if (filters?.period) params.append('period', filters.period);
+    if (filters?.professional_id) params.append('professional_id', filters.professional_id.toString());
+    return this.request<ProcedurePayment[]>(`/finance/procedure-payments/?${params.toString()}`);
   }
 
   async updatePaymentStatus(id: number, status: 'a_receber' | 'pendente' | 'pago') {

@@ -4,20 +4,23 @@ import { ptBR } from 'date-fns/locale';
 import { ChevronLeft, ChevronRight, Phone, Clock, CheckCircle, XCircle, AlertTriangle, Bell, Users, Plus, Ban, Loader2, CalendarDays } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-import { api, type Appointment, type AiSuggestion, type WaitingListPatient } from '@/services/api';
+import { api, type Appointment, type AiSuggestion, type WaitingListPatient, type Block } from '@/services/api';
 import { NewAppointmentModal } from '@/components/agenda/NewAppointmentModal';
 import { BlockTimeModal } from '@/components/agenda/BlockTimeModal';
 import { AppointmentDetailModal } from '@/components/agenda/AppointmentDetailModal';
+import { ProfessionalFilter, colorMap } from '@/components/agenda/ProfessionalFilter';
 
-interface Block {
-  id: number;
-  title: string;
-  day_of_week: number;
-  start_time: string;
-  end_time: string;
-  recurring: boolean;
-  specific_date?: string;
-}
+// Professional color classes for appointments
+const professionalColorClasses: Record<string, string> = {
+  blue: 'bg-blue-500/20 border-blue-500/40 text-blue-700 dark:text-blue-300',
+  green: 'bg-green-500/20 border-green-500/40 text-green-700 dark:text-green-300',
+  purple: 'bg-purple-500/20 border-purple-500/40 text-purple-700 dark:text-purple-300',
+  orange: 'bg-orange-500/20 border-orange-500/40 text-orange-700 dark:text-orange-300',
+  pink: 'bg-pink-500/20 border-pink-500/40 text-pink-700 dark:text-pink-300',
+  cyan: 'bg-cyan-500/20 border-cyan-500/40 text-cyan-700 dark:text-cyan-300',
+  amber: 'bg-amber-500/20 border-amber-500/40 text-amber-700 dark:text-amber-300',
+  rose: 'bg-rose-500/20 border-rose-500/40 text-rose-700 dark:text-rose-300',
+};
 
 export default function Agenda() {
   const [currentDate, setCurrentDate] = useState(new Date());
@@ -31,16 +34,17 @@ export default function Agenda() {
   const [isBlockTimeOpen, setIsBlockTimeOpen] = useState(false);
   const [selectedAppointment, setSelectedAppointment] = useState<Appointment | null>(null);
   const [isDetailOpen, setIsDetailOpen] = useState(false);
+  const [selectedProfessionalId, setSelectedProfessionalId] = useState<number | null>(null);
 
   useEffect(() => {
     loadData();
-  }, [currentDate, view]);
+  }, [currentDate, view, selectedProfessionalId]);
 
   async function loadData() {
     setIsLoading(true);
     
     const [appointmentsRes, suggestionsRes, waitingRes] = await Promise.all([
-      api.getAppointments(),
+      api.getAppointments(undefined, selectedProfessionalId || undefined),
       api.getAiSuggestions(),
       api.getWaitingList(),
     ]);
@@ -112,6 +116,16 @@ export default function Agenda() {
     cancelled: 'bg-destructive/20 border-destructive/40 text-destructive',
   };
 
+  // Get color class for appointment (professional color or status color)
+  const getAppointmentColorClass = (apt: Appointment) => {
+    // If professional has a color, use it
+    if (apt.professional_color && professionalColorClasses[apt.professional_color]) {
+      return professionalColorClasses[apt.professional_color];
+    }
+    // Otherwise use status color
+    return statusColors[apt.status] || statusColors.pending;
+  };
+
   const getAppointmentsForSlot = (day: Date, hour: number) => {
     const dateStr = format(day, 'yyyy-MM-dd');
     return appointments.filter(apt => {
@@ -171,6 +185,12 @@ export default function Agenda() {
           <p className="text-muted-foreground">Gerencie seus agendamentos com IA</p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
+          {/* Professional Filter */}
+          <ProfessionalFilter 
+            value={selectedProfessionalId} 
+            onChange={setSelectedProfessionalId} 
+          />
+          
           <Button onClick={() => setIsNewAppointmentOpen(true)}>
             <Plus className="h-4 w-4 mr-2" />
             Novo Agendamento
@@ -284,7 +304,7 @@ export default function Agenda() {
                                 key={apt.id}
                                 className={cn(
                                   'text-xs p-1 rounded truncate',
-                                  statusColors[apt.status] || statusColors.pending
+                                  getAppointmentColorClass(apt)
                                 )}
                                 onClick={(e) => {
                                   e.stopPropagation();
@@ -292,6 +312,9 @@ export default function Agenda() {
                                 }}
                               >
                                 {apt.time} - {apt.patient_name}
+                                {apt.professional_name && (
+                                  <span className="block text-[10px] opacity-70">{apt.professional_name}</span>
+                                )}
                               </div>
                             ))}
                             {dayAppointments.length > 2 && (
@@ -387,12 +410,17 @@ export default function Agenda() {
                                 onClick={() => handleAppointmentClick(apt)}
                                 className={cn(
                                   'rounded-lg border p-2 text-xs cursor-pointer transition-all hover:shadow-md',
-                                  statusColors[apt.status] || statusColors.pending
+                                  getAppointmentColorClass(apt)
                                 )}
                               >
                                 <p className="font-medium truncate">{apt.patient_name}</p>
                                 <p className="truncate opacity-80">{apt.procedure || 'Consulta'}</p>
-                                <p className="text-[10px] opacity-60">{apt.time}</p>
+                                <div className="flex items-center justify-between mt-1">
+                                  <p className="text-[10px] opacity-60">{apt.time}</p>
+                                  {apt.professional_name && (
+                                    <p className="text-[10px] opacity-70 truncate max-w-[80px]">{apt.professional_name}</p>
+                                  )}
+                                </div>
                               </div>
                             ))}
                           </div>

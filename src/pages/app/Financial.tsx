@@ -28,6 +28,7 @@ import { api, type FinancialSummary, type CashFlowData, type Receipt, type OcrRe
 import { toast } from '@/hooks/use-toast';
 import { format, parseISO } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
+import { ProfessionalFilter } from '@/components/agenda/ProfessionalFilter';
 
 export default function Financial() {
   const [summary, setSummary] = useState<FinancialSummary | null>(null);
@@ -41,21 +42,22 @@ export default function Financial() {
   const [paidPayments, setPaidPayments] = useState<ProcedurePayment[]>([]);
   const [updatingPayment, setUpdatingPayment] = useState<number | null>(null);
   const [activeTab, setActiveTab] = useState<'overview' | 'history'>('overview');
+  const [selectedProfessionalId, setSelectedProfessionalId] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     loadData();
-  }, []);
+  }, [selectedProfessionalId]);
 
   async function loadData() {
     setIsLoading(true);
     const [summaryRes, cashFlowRes, receiptsRes, yesterdayRes, pendingRes, paidRes] = await Promise.all([
-      api.getFinancialSummary(),
+      api.getFinancialSummary(selectedProfessionalId || undefined),
       api.getCashFlow('month'),
       api.getReceipts(),
-      api.getProcedurePayments({ date: 'yesterday' }),
-      api.getProcedurePayments({ status: 'pending' }),
-      api.getProcedurePayments({ status: 'pago' }),
+      api.getProcedurePayments({ date: 'yesterday', professional_id: selectedProfessionalId || undefined }),
+      api.getProcedurePayments({ status: 'pending', professional_id: selectedProfessionalId || undefined }),
+      api.getProcedurePayments({ status: 'pago', professional_id: selectedProfessionalId || undefined }),
     ]);
 
     if (summaryRes.success && summaryRes.data) setSummary(summaryRes.data);
@@ -138,12 +140,18 @@ export default function Financial() {
   return (
     <div className="space-y-6 animate-fade-in">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-foreground">Financeiro</h1>
           <p className="text-muted-foreground">Controle de fluxo de caixa e reembolsos</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          {/* Professional Filter */}
+          <ProfessionalFilter 
+            value={selectedProfessionalId} 
+            onChange={setSelectedProfessionalId} 
+          />
+          
           <Button
             variant={activeTab === 'overview' ? 'default' : 'outline'}
             onClick={() => setActiveTab('overview')}

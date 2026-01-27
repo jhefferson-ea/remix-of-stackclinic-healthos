@@ -1,15 +1,17 @@
 import { useState, useEffect } from 'react';
-import { Users, UserPlus, Shield, Mail, MoreVertical, Loader2, Copy, Check, Key } from 'lucide-react';
+import { Users, UserPlus, Shield, Mail, MoreVertical, Loader2, Copy, Check, Key, Clock, Stethoscope } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Badge } from '@/components/ui/badge';
 import { api } from '@/services/api';
 import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
+import { ProfessionalProcedures } from './ProfessionalProcedures';
+import { ProfessionalSchedule } from './ProfessionalSchedule';
 
 interface TeamMember {
   id: number;
@@ -67,6 +69,13 @@ export function TeamManagement() {
   const [inviteResult, setInviteResult] = useState<InviteResult | null>(null);
   const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
   const [isCopied, setIsCopied] = useState(false);
+  
+  // Professional modals
+  const [isProceduresOpen, setIsProceduresOpen] = useState(false);
+  const [isScheduleOpen, setIsScheduleOpen] = useState(false);
+  const [selectedProfessionalId, setSelectedProfessionalId] = useState<number | null>(null);
+  const [selectedProfessionalName, setSelectedProfessionalName] = useState<string>('');
+  
   const { toast } = useToast();
 
   useEffect(() => {
@@ -229,6 +238,18 @@ export function TeamManagement() {
     setIsRoleModalOpen(true);
   }
 
+  function openProceduresModal(member: TeamMember) {
+    setSelectedProfessionalId(member.id);
+    setSelectedProfessionalName(member.name);
+    setIsProceduresOpen(true);
+  }
+
+  function openScheduleModal(member: TeamMember) {
+    setSelectedProfessionalId(member.id);
+    setSelectedProfessionalName(member.name);
+    setIsScheduleOpen(true);
+  }
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center py-12">
@@ -305,7 +326,21 @@ export function TeamManagement() {
                           <MoreVertical className="h-4 w-4" />
                         </Button>
                       </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
+                      <DropdownMenuContent align="end" className="bg-popover border-border">
+                        {/* Professional-specific options for doctors */}
+                        {(member.role === 'doctor' || member.role === 'owner') && (
+                          <>
+                            <DropdownMenuItem onClick={() => openProceduresModal(member)}>
+                              <Stethoscope className="h-4 w-4 mr-2" />
+                              Procedimentos
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => openScheduleModal(member)}>
+                              <Clock className="h-4 w-4 mr-2" />
+                              Horário Individual
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                          </>
+                        )}
                         <DropdownMenuItem onClick={() => openRoleModal(member)}>
                           Alterar Cargo
                         </DropdownMenuItem>
@@ -486,6 +521,22 @@ export function TeamManagement() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Professional Procedures Modal */}
+      <ProfessionalProcedures
+        open={isProceduresOpen}
+        onOpenChange={setIsProceduresOpen}
+        professionalId={selectedProfessionalId}
+        professionalName={selectedProfessionalName}
+      />
+
+      {/* Professional Schedule Modal */}
+      <ProfessionalSchedule
+        open={isScheduleOpen}
+        onOpenChange={setIsScheduleOpen}
+        professionalId={selectedProfessionalId}
+        professionalName={selectedProfessionalName}
+      />
     </div>
   );
 }
