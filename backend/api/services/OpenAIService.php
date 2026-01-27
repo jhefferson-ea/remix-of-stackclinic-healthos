@@ -20,12 +20,21 @@ class OpenAIService {
     private $db;
     private $clinica;
     private $paciente;
+    private $sessionPhone;
     
     public function __construct($db, $clinica, $paciente = null) {
         $this->apiKey = getenv('OPENAI_API_KEY') ?: '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';
         $this->db = $db;
         $this->clinica = $clinica;
         $this->paciente = $paciente;
+        $this->sessionPhone = null;
+    }
+    
+    /**
+     * Define o session_phone para vincular conversas a agendamentos
+     */
+    public function setSessionPhone($sessionPhone) {
+        $this->sessionPhone = $sessionPhone;
     }
     
     // ========================================
@@ -243,13 +252,18 @@ class OpenAIService {
     
     /**
      * Determina o passo atual baseado nos dados coletados
+     * Fluxo: procedimento -> data -> horário -> nome -> telefone -> confirmação
      */
     public function determineCurrentStep($collectedData) {
         if (!empty($collectedData['patient_name']) && 
+            !empty($collectedData['patient_phone']) &&
             !empty($collectedData['date']) && 
             !empty($collectedData['time']) && 
             !empty($collectedData['procedure'])) {
             return 'confirm';
+        }
+        if (!empty($collectedData['patient_name'])) {
+            return 'phone';
         }
         if (!empty($collectedData['time'])) {
             return 'name';
@@ -279,7 +293,10 @@ class OpenAIService {
         if (empty($collectedData['patient_name'])) {
             return "O cliente escolheu horário {$collectedData['time']}. Pergunte o nome completo para finalizar.";
         }
-        return "TODOS OS DADOS COLETADOS! Use createAppointment para confirmar: {$collectedData['procedure']} em {$collectedData['date']} às {$collectedData['time']} para {$collectedData['patient_name']}.";
+        if (empty($collectedData['patient_phone'])) {
+            return "O cliente informou nome '{$collectedData['patient_name']}'. Pergunte o telefone para contato (com DDD).";
+        }
+        return "TODOS OS DADOS COLETADOS! Use createAppointment para confirmar: {$collectedData['procedure']} em {$collectedData['date']} às {$collectedData['time']} para {$collectedData['patient_name']} (tel: {$collectedData['patient_phone']}).";
     }
     
     // ========================================
@@ -374,6 +391,7 @@ class OpenAIService {
         $dateStatus = $collectedData['date'] ? "✅ " . date('d/m/Y', strtotime($collectedData['date'])) : '❌ NÃO INFORMADO';
         $timeStatus = $collectedData['time'] ? "✅ {$collectedData['time']}" : '❌ NÃO INFORMADO';
         $nameStatus = $collectedData['patient_name'] ? "✅ {$collectedData['patient_name']}" : '❌ NÃO INFORMADO';
+        $phoneStatus = $collectedData['patient_phone'] ? "✅ {$collectedData['patient_phone']}" : '❌ NÃO INFORMADO';
         
         $nextStep = $this->getNextStepInstruction($collectedData);
 
@@ -396,6 +414,7 @@ Procedimento: {$procStatus}
 Data: {$dateStatus}
 Horário: {$timeStatus}
 Nome: {$nameStatus}
+Telefone: {$phoneStatus}
 
 PRÓXIMO PASSO: {$nextStep}
 ═══════════════════════════════════════
@@ -407,13 +426,14 @@ REGRAS ABSOLUTAS (SIGA OU A CONVERSA FALHARÁ):
 3. Se Procedimento = ✅, NÃO pergunte de novo. Vá para o próximo campo ❌.
 4. MÁXIMO 2 frases curtas. UMA pergunta por vez.
 5. Use checkAvailability ANTES de oferecer horários.
-6. Só use createAppointment quando TODOS estiverem ✅.
+6. Só use createAppointment quando TODOS (incluindo telefone) estiverem ✅.
 7. NUNCA invente dados. Use EXATAMENTE o que está acima.
 
 EXEMPLOS:
 - Se Procedimento=✅ e Data=❌ → "Para qual data prefere?"
 - Se Data=✅ e Horário=❌ → chame checkAvailability, depois mostre opções
 - Se Horário=✅ e Nome=❌ → "Qual seu nome completo?"
+- Se Nome=✅ e Telefone=❌ → "Qual seu telefone para contato (com DDD)?"
 - Se TODOS=✅ → chame createAppointment
 
 TOM: {$toneInstruction}
@@ -518,7 +538,7 @@ PROMPT;
                 'type' => 'function',
                 'function' => [
                     'name' => 'createAppointment',
-                    'description' => 'Cria agendamento. Só chame quando tiver TODOS: data, horário, procedimento e nome completo.',
+                    'description' => 'Cria agendamento. Só chame quando tiver TODOS: data, horário, procedimento, nome E telefone.',
                     'parameters' => [
                         'type' => 'object',
                         'properties' => [
@@ -526,9 +546,9 @@ PROMPT;
                             'time' => ['type' => 'string', 'description' => 'Horário HH:MM'],
                             'procedure_name' => ['type' => 'string', 'description' => 'Nome do procedimento'],
                             'patient_name' => ['type' => 'string', 'description' => 'Nome completo do paciente (OBRIGATÓRIO)'],
-                            'patient_phone' => ['type' => 'string', 'description' => 'Telefone (opcional)']
+                            'patient_phone' => ['type' => 'string', 'description' => 'Telefone com DDD (OBRIGATÓRIO)']
                         ],
-                        'required' => ['date', 'time', 'procedure_name', 'patient_name']
+                        'required' => ['date', 'time', 'procedure_name', 'patient_name', 'patient_phone']
                     ]
                 ]
             ],
@@ -636,7 +656,8 @@ PROMPT;
                     $this->sanitizeString($arguments['procedure_name'] ?? ''),
                     $this->sanitizeString($arguments['patient_name'] ?? ''),
                     $this->sanitizePhone($arguments['patient_phone'] ?? ''),
-                    $clinicaId
+                    $clinicaId,
+                    $this->sessionPhone // Passa session_phone para vincular conversa
                 );
                 
             case 'transferToHuman':
@@ -778,10 +799,11 @@ PROMPT;
         ];
     }
     
-    private function createAppointment($date, $time, $procedureName, $patientName, $patientPhone, $clinicaId) {
+    private function createAppointment($date, $time, $procedureName, $patientName, $patientPhone, $clinicaId, $sessionPhone = null) {
         if (!$date) return ['success' => false, 'error' => 'Data inválida.'];
         if (!$time) return ['success' => false, 'error' => 'Horário inválido.'];
         if (strlen($patientName) < 3) return ['success' => false, 'error' => 'Nome do paciente é obrigatório.'];
+        if (strlen($patientPhone) < 10) return ['success' => false, 'error' => 'Telefone é obrigatório (mínimo 10 dígitos).'];
         
         // Busca procedimento
         $procedureId = null;
@@ -811,7 +833,26 @@ PROMPT;
             return ['success' => false, 'error' => "Horário {$time} não disponível. Horários livres: " . implode(', ', array_slice($availability['slots'], 0, 5))];
         }
         
-        // Cria paciente
+        // ========================================
+        // VALIDA SE PACIENTE JÁ EXISTE PELO TELEFONE
+        // ========================================
+        $existingPatient = null;
+        if ($patientPhone) {
+            $stmt = $this->db->prepare("
+                SELECT id, name, phone FROM pacientes 
+                WHERE clinica_id = :clinica_id AND phone = :phone
+                LIMIT 1
+            ");
+            $stmt->execute([':clinica_id' => $clinicaId, ':phone' => $patientPhone]);
+            $existingPatient = $stmt->fetch();
+            
+            if ($existingPatient) {
+                $this->paciente = $existingPatient;
+                error_log("Paciente EXISTENTE encontrado: ID {$existingPatient['id']} - {$existingPatient['name']}");
+            }
+        }
+        
+        // Cria paciente SE não existe
         if (!$this->paciente) {
             $phone = $patientPhone ?: ('WHATSAPP_' . time());
             try {
@@ -822,18 +863,20 @@ PROMPT;
                 $stmt->execute([':clinica_id' => $clinicaId, ':name' => $patientName, ':phone' => $phone]);
                 $pacienteId = $this->db->lastInsertId();
                 $this->paciente = ['id' => $pacienteId, 'name' => $patientName, 'phone' => $phone];
-                error_log("Paciente criado: ID {$pacienteId}");
+                error_log("Paciente NOVO criado: ID {$pacienteId}");
             } catch (Exception $e) {
                 error_log("Erro paciente: " . $e->getMessage());
                 return ['success' => false, 'error' => 'Erro ao registrar paciente'];
             }
         }
         
-        // Cria agendamento
+        // ========================================
+        // CRIA AGENDAMENTO COM SESSION_PHONE
+        // ========================================
         try {
             $stmt = $this->db->prepare("
-                INSERT INTO agendamentos (clinica_id, paciente_id, date, time, duration, `procedure`, procedimento_id, status, notes, created_at)
-                VALUES (:clinica_id, :paciente_id, :date, :time, :duration, :procedure, :procedimento_id, 'confirmed', 'Agendado via WhatsApp IA', NOW())
+                INSERT INTO agendamentos (clinica_id, paciente_id, date, time, duration, `procedure`, procedimento_id, status, notes, session_phone, created_at)
+                VALUES (:clinica_id, :paciente_id, :date, :time, :duration, :procedure, :procedimento_id, 'confirmed', 'Agendado via WhatsApp IA', :session_phone, NOW())
             ");
             $stmt->execute([
                 ':clinica_id' => $clinicaId,
@@ -842,13 +885,14 @@ PROMPT;
                 ':time' => $time,
                 ':duration' => $duration,
                 ':procedure' => $procedureNameFinal,
-                ':procedimento_id' => $procedureId
+                ':procedimento_id' => $procedureId,
+                ':session_phone' => $sessionPhone
             ]);
             
             $appointmentId = $this->db->lastInsertId();
             $dateFormatted = date('d/m/Y', strtotime($date));
             
-            error_log("Agendamento criado: ID {$appointmentId}");
+            error_log("Agendamento criado: ID {$appointmentId} (session_phone: {$sessionPhone})");
             
             return [
                 'success' => true,
