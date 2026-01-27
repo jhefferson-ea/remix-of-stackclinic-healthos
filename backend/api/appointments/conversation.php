@@ -10,6 +10,13 @@ require_once __DIR__ . '/../config/Database.php';
 require_once __DIR__ . '/../helpers/Response.php';
 require_once __DIR__ . '/../helpers/Tenant.php';
 
+// Debug logging
+$debugLog = __DIR__ . '/../debug.log';
+file_put_contents($debugLog, "\n=== CONVERSATION DEBUG " . date('Y-m-d H:i:s') . " ===\n", FILE_APPEND);
+file_put_contents($debugLog, "URI: " . $_SERVER['REQUEST_URI'] . "\n", FILE_APPEND);
+file_put_contents($debugLog, "HTTP_AUTHORIZATION: " . (isset($_SERVER['HTTP_AUTHORIZATION']) ? 'SIM' : 'NAO') . "\n", FILE_APPEND);
+file_put_contents($debugLog, "REDIRECT_HTTP_AUTHORIZATION: " . (isset($_SERVER['REDIRECT_HTTP_AUTHORIZATION']) ? 'SIM' : 'NAO') . "\n", FILE_APPEND);
+
 if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
     Response::methodNotAllowed();
 }

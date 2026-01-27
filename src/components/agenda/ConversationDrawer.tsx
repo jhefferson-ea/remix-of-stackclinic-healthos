@@ -1,4 +1,4 @@
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
+import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from '@/components/ui/sheet';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useEffect, useState } from 'react';
 import { api } from '@/services/api';
@@ -57,6 +57,9 @@ export function ConversationDrawer({ open, onOpenChange, appointmentId }: Conver
       <SheetContent className="w-[400px] sm:w-[500px]">
         <SheetHeader>
           <SheetTitle>Conversa do Agendamento</SheetTitle>
+          <SheetDescription className="sr-only">
+            Histórico de mensagens da conversa que originou este agendamento
+          </SheetDescription>
         </SheetHeader>
         
         <ScrollArea className="h-[calc(100vh-120px)] mt-4">

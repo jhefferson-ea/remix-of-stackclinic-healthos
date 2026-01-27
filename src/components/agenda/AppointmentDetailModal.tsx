@@ -4,6 +4,7 @@ import {
   DialogContent,
   DialogHeader,
   DialogTitle,
+  DialogDescription,
   DialogFooter,
 } from '@/components/ui/dialog';
 import {
@@ -75,7 +76,7 @@ export function AppointmentDetailModal({
 
   if (!appointment) return null;
 
-  const formattedDate = format(parseISO(appointment.date), "EEEE, d 'de' MMMM 'de' yyyy", { locale: ptBR });
+  const formattedDate = format(parseISO(appointment.date), "EEE, dd/MM/yyyy", { locale: ptBR });
 
   return (
     <>
@@ -83,6 +84,9 @@ export function AppointmentDetailModal({
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>Detalhes do Agendamento</DialogTitle>
+            <DialogDescription className="sr-only">
+              Informações completas sobre o agendamento selecionado
+            </DialogDescription>
           </DialogHeader>
 
           <div className="space-y-4 py-4">
@@ -96,7 +100,7 @@ export function AppointmentDetailModal({
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div className="flex items-center gap-2 p-3 rounded-lg border border-border">
                 <Calendar className="h-4 w-4 text-muted-foreground" />
                 <div>
