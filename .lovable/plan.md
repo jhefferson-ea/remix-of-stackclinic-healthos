@@ -1,140 +1,102 @@
 
-# Plano: Corrigir Erro 404 - Instância WhatsApp Não Existe
+
+# Plano: Corrigir Bloqueio de Segurança do Ngrok
 
 ## Problema Identificado
 
-A Evolution API retorna **404 Not Found** porque a instância `stackclinic_16_260127132652` não existe mais. Quando você reiniciou o Docker/ngrok, as instâncias antigas foram perdidas.
+O **ngrok grátis** exibe uma página de verificação de segurança para requisições que não incluem o header especial `ngrok-skip-browser-warning`. 
 
-## Causa Raiz
-
-O banco de dados da sua clínica ainda tem o `evolution_instance_id` antigo salvo, mas essa instância não existe mais na Evolution API.
+Quando o PHP faz requisições via cURL, ele pode estar recebendo essa página HTML ao invés do JSON esperado da Evolution API, causando erros intermitentes (404, 400).
 
 ---
 
-## Solução em 2 Partes
+## Solução
 
-### Parte 1: Atualizar o Backend PHP
+Adicionar o header `ngrok-skip-browser-warning` em todas as requisições feitas pelo `EvolutionService.php`.
 
-**Arquivo:** `backend/api/config/whatsapp.php`
+---
 
-**Mudança:** Antes de tentar conectar, verificar se a instância existe na Evolution API. Se não existir (404), limpar o banco e criar uma nova instância.
-
-```text
-Fluxo Atualizado:
-+------------------+     +-------------------+     +------------------+
-| POST /whatsapp   | --> | Verifica se       | --> | Instância existe |
-| (Conectar)       |     | instância existe  |     | → Gera QR Code   |
-+------------------+     +-------------------+     +------------------+
-                               |
-                               | 404 Not Found
-                               v
-                         +-------------------+
-                         | Limpa instance_id |
-                         | do banco e cria   |
-                         | nova instância    |
-                         +-------------------+
-```
-
-### Parte 2: Adicionar Método de Verificação no EvolutionService
+## Alteração Necessária
 
 **Arquivo:** `backend/api/services/EvolutionService.php`
 
-**Mudança:** Adicionar método `instanceExists()` que verifica se a instância existe na Evolution API.
+**Local:** Método `makeRequest()` - linhas 378-385
 
----
-
-## Alterações Específicas
-
-### 1. EvolutionService.php - Novo Método
-
-Adicionar método para verificar se instância existe:
-
+**Código atual:**
 ```php
-/**
- * Verifica se a instância existe na Evolution API
- */
-public function instanceExists() {
-    if (!$this->instanceId) {
-        return false;
-    }
-    
-    $response = $this->makeRequest("/instance/connectionState/{$this->instanceId}", 'GET');
-    
-    // Se retornou null, a instância não existe (404)
-    return $response !== null;
+$headers = [
+    'Content-Type: application/json',
+    'Accept: application/json'
+];
+
+if ($this->apiKey) {
+    $headers[] = 'apikey: ' . $this->apiKey;
 }
 ```
 
-### 2. whatsapp.php - Verificação antes de conectar
-
-No método POST, antes de tentar gerar QR, verificar se a instância existe:
-
+**Código corrigido:**
 ```php
-// Se tem instância salva, verificar se ainda existe na Evolution API
-if ($clinica['evolution_instance_id']) {
-    $exists = $evolution->instanceExists();
-    
-    if (!$exists) {
-        // Instância não existe mais, limpar do banco
-        $stmt = $db->prepare("
-            UPDATE clinica 
-            SET evolution_instance_id = NULL, 
-                whatsapp_connected = 0, 
-                whatsapp_phone = NULL
-            WHERE id = :id
-        ");
-        $stmt->execute([':id' => $clinicaId]);
-        
-        // Atualizar variável local
-        $clinica['evolution_instance_id'] = null;
-    }
-}
+$headers = [
+    'Content-Type: application/json',
+    'Accept: application/json',
+    'ngrok-skip-browser-warning: true'  // Bypass ngrok free tier warning page
+];
 
-// Agora segue o fluxo normal de criar instância se não existir
+if ($this->apiKey) {
+    $headers[] = 'apikey: ' . $this->apiKey;
+}
+```
+
+---
+
+## Por que isso funciona
+
+De acordo com a documentação do ngrok (e a própria imagem que você enviou), existem 3 formas de remover a página de aviso:
+
+1. **Enviar header `ngrok-skip-browser-warning`** ✅ (nossa solução)
+2. Usar User-Agent customizado
+3. Fazer upgrade para conta paga
+
+A opção 1 é a mais simples e não requer mudanças na conta do ngrok.
+
+---
+
+## Fluxo Corrigido
+
+```text
+                    SEM o header                    COM o header
+                   +-------------+                 +-------------+
+  PHP cURL         |  ngrok      |                 |  ngrok      |
+  request    -->   |  retorna    |           -->   |  passa      |
+                   |  HTML de    |                 |  direto     |
+                   |  verificação|                 |  para API   |
+                   +-------------+                 +-------------+
+                         |                               |
+                         v                               v
+                   JSON decode                     JSON válido
+                   FALHA                           da Evolution API
 ```
 
 ---
 
 ## Detalhes Técnicos
 
-### Arquivos a Modificar
-
-1. **`backend/api/services/EvolutionService.php`**
-   - Adicionar método `instanceExists()` (após linha 121)
-
-2. **`backend/api/config/whatsapp.php`**  
-   - Adicionar verificação de existência no método POST (após linha 84)
-
-### Fluxo Corrigido
-
-```text
-Usuário clica "Conectar WhatsApp"
-         ↓
-Backend verifica: instância existe na Evolution API?
-         ↓
-    [NÃO - 404]              [SIM]
-         ↓                      ↓
-Limpa banco de dados     Tenta gerar QR Code
-         ↓                      ↓
-Cria nova instância      Retorna QR para usuário
-         ↓
-Configura webhook
-         ↓
-Retorna QR para usuário
-```
+- **Arquivo:** `backend/api/services/EvolutionService.php`
+- **Linha:** 378-381 (array de headers)
+- **Mudança:** Adicionar `'ngrok-skip-browser-warning: true'` ao array
 
 ---
 
 ## Após Implementação
 
-1. Faça upload dos dois arquivos PHP atualizados para seu servidor
+1. Faça upload do arquivo `EvolutionService.php` atualizado
 2. Tente conectar o WhatsApp novamente
-3. O sistema vai detectar que a instância antiga não existe
-4. Automaticamente criar uma nova instância
-5. Retornar o QR Code para você escanear
+3. Todas as requisições agora devem bypassar a página de verificação do ngrok
+4. Os erros intermitentes devem parar
 
 ---
 
 ## Benefício
 
-Essa correção torna o sistema **resiliente a reinicializações** do Docker/ngrok. Sempre que a instância não existir mais, o sistema automaticamente cria uma nova.
+Esta correção garante que **100% das requisições** ao ngrok recebam resposta JSON válida, eliminando os problemas de conexão causados pela página de verificação.
+
