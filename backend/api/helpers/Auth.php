@@ -136,15 +136,29 @@ class Auth {
         }
         
         // 5. FALLBACK: Tentar X-Auth-Token (header alternativo que nao e removido pelo servidor)
+        file_put_contents($logFile, "=== TENTANDO X-Auth-Token FALLBACK ===\n", FILE_APPEND);
+        
         $xAuthToken = $_SERVER['HTTP_X_AUTH_TOKEN'] ?? null;
+        file_put_contents($logFile, "HTTP_X_AUTH_TOKEN via \$_SERVER: " . ($xAuthToken ? "SIM (len=" . strlen($xAuthToken) . ")" : "NAO") . "\n", FILE_APPEND);
+        
+        // Tenta tambem via getallheaders (case-insensitive)
         if (!$xAuthToken && function_exists('getallheaders')) {
             $headers = getallheaders();
+            file_put_contents($logFile, "Buscando x-auth-token em getallheaders()...\n", FILE_APPEND);
             foreach ($headers as $key => $value) {
-                if (strtolower($key) === 'x-auth-token') {
+                $keyLower = strtolower($key);
+                if ($keyLower === 'x-auth-token') {
                     $xAuthToken = $value;
+                    file_put_contents($logFile, "ENCONTRADO X-Auth-Token via getallheaders! (key={$key})\n", FILE_APPEND);
                     break;
                 }
             }
+        }
+        
+        // Tenta via REDIRECT_HTTP_X_AUTH_TOKEN (caso Apache redirecione)
+        if (!$xAuthToken && isset($_SERVER['REDIRECT_HTTP_X_AUTH_TOKEN'])) {
+            $xAuthToken = $_SERVER['REDIRECT_HTTP_X_AUTH_TOKEN'];
+            file_put_contents($logFile, "ENCONTRADO via REDIRECT_HTTP_X_AUTH_TOKEN!\n", FILE_APPEND);
         }
         
         if ($xAuthToken) {

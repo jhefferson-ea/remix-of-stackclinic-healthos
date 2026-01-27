@@ -322,6 +322,40 @@ try {
         ':paciente_id2' => $paciente ? $paciente['id'] : null
     ]);
     
+    // =========================================
+    // 10. SALVA MENSAGENS na tabela whatsapp_messages
+    // =========================================
+    
+    // Salva mensagem INCOMING (do usuário)
+    $stmt = $db->prepare("
+        INSERT INTO whatsapp_messages 
+        (clinica_id, paciente_id, phone, direction, message, message_type, ai_processed, created_at)
+        VALUES (:clinica_id, :paciente_id, :phone, 'incoming', :message, 'text', 1, NOW())
+    ");
+    $stmt->execute([
+        ':clinica_id' => $clinicaId,
+        ':paciente_id' => $paciente ? $paciente['id'] : null,
+        ':phone' => $sessionPhone,
+        ':message' => $message
+    ]);
+    
+    // Salva mensagem OUTGOING (da IA)
+    $stmt = $db->prepare("
+        INSERT INTO whatsapp_messages 
+        (clinica_id, paciente_id, phone, direction, message, message_type, ai_processed, function_calls, tokens_used, created_at)
+        VALUES (:clinica_id, :paciente_id, :phone, 'outgoing', :message, 'text', 1, :function_calls, :tokens_used, NOW())
+    ");
+    $stmt->execute([
+        ':clinica_id' => $clinicaId,
+        ':paciente_id' => $paciente ? $paciente['id'] : null,
+        ':phone' => $sessionPhone,
+        ':message' => $responseText,
+        ':function_calls' => json_encode($result['function_calls'] ?? null),
+        ':tokens_used' => $result['tokens_used'] ?? 0
+    ]);
+    
+    error_log("SAVED to whatsapp_messages: incoming + outgoing for phone={$sessionPhone}");
+    
     Response::success([
         'response' => $responseText,
         'session_phone' => $sessionPhone,
