@@ -224,36 +224,15 @@ class EvolutionService {
         $qrcode = $this->extractQrFromResponse($resp);
         $pairing = $resp['pairingCode'] ?? null;
 
-        // 2) Se vier count=0 (instância presa), faz logout para resetar e tenta novamente
+        // 2) Se vier count=0, isso NÃO é erro: normalmente significa que a instância ainda está
+        // inicializando e o QR/pairing ainda não foi gerado. Não fazemos logout e não fazemos
+        // POST /instance/connect (algumas builds retornam 404 para esse método).
         if (empty($qrcode) && empty($pairing) && isset($resp['count']) && (int)$resp['count'] === 0) {
-            file_put_contents($debugLogFile, "CONNECT_ONCE: count=0 detectado, fazendo logout para resetar...\n", FILE_APPEND);
-            
-            // Faz logout para resetar a sessão presa
-            $this->logoutInstance();
-            
-            // Aguarda 3 segundos para o logout processar
-            sleep(3);
-            
-            // Tenta novamente gerar QR após logout
-            $resp = $this->makeRequest($endpoint, 'GET');
-            file_put_contents($debugLogFile, "CONNECT_ONCE: Response após logout = " . json_encode($resp) . "\n", FILE_APPEND);
-            
-            if ($resp) {
-                $qrcode = $this->extractQrFromResponse($resp);
-                $pairing = $resp['pairingCode'] ?? null;
-            }
-            
-            // Se ainda não tiver QR, tenta POST como fallback
-            if (empty($qrcode) && empty($pairing)) {
-                $postResp = $this->makeRequest($endpoint, 'POST', []);
-                file_put_contents($debugLogFile, "CONNECT_ONCE: POST Response após logout = " . json_encode($postResp) . "\n", FILE_APPEND);
-
-                if ($postResp) {
-                    $qrcode = $qrcode ?: $this->extractQrFromResponse($postResp);
-                    $pairing = $pairing ?: ($postResp['pairingCode'] ?? null);
-                    $resp = $postResp;
-                }
-            }
+            file_put_contents(
+                $debugLogFile,
+                "CONNECT_ONCE: count=0 (pending). Não resetando sessão; aguardando próxima tentativa do polling.\n",
+                FILE_APPEND
+            );
         }
 
         return [
