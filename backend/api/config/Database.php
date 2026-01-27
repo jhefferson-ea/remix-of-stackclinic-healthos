@@ -5,7 +5,7 @@
  */
 
 class Database {
-    private $host = "localhost";
+    private $host = "srv725.hstgr.io";
     private $db_name = "u226840309_stackclinic";
     private $username = "u226840309_stackclinicusr";
     private $password = "Stack@2025";
