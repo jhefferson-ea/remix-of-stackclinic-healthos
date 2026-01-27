@@ -13,6 +13,9 @@ class Database {
 
     public function getConnection() {
         $this->conn = null;
+        
+        // Define timezone do PHP para Brasília
+        date_default_timezone_set('America/Sao_Paulo');
 
         try {
             $this->conn = new PDO(
@@ -25,6 +28,10 @@ class Database {
                     PDO::ATTR_EMULATE_PREPARES => false
                 ]
             );
+            
+            // Define timezone do MySQL para Brasília (UTC-3)
+            $this->conn->exec("SET time_zone = '-03:00'");
+            
         } catch(PDOException $exception) {
             error_log("Connection error: " . $exception->getMessage());
             throw new Exception("Erro de conexão com o banco de dados");

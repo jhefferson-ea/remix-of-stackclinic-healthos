@@ -56,12 +56,12 @@ try {
         exit;
     }
     
-    // Busca mensagens da sessão
+    // Busca mensagens da sessão (ordena por ID para garantir ordem de inserção)
     $stmt = $db->prepare("
         SELECT direction, message, created_at 
         FROM whatsapp_messages 
         WHERE clinica_id = :clinica_id AND phone = :phone
-        ORDER BY created_at ASC
+        ORDER BY id ASC
     ");
     $stmt->execute([
         ':clinica_id' => $clinicaId, 

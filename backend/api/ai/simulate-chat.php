@@ -11,6 +11,9 @@
  * - A IA recebe estado explícito, não precisa inferir do histórico
  */
 
+// Garante timezone de Brasília para todas as operações de data/hora
+date_default_timezone_set('America/Sao_Paulo');
+
 require_once __DIR__ . '/../config/cors.php';
 require_once __DIR__ . '/../config/Database.php';
 require_once __DIR__ . '/../helpers/Response.php';
