@@ -12,7 +12,8 @@ class OpenAIService {
     private $paciente;
     
     public function __construct($db, $clinica, $paciente = null) {
-        $this->apiKey = getenv('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');
+        // Use environment variable or fallback to direct key
+        $this->apiKey = getenv('OPENAI_API_KEY') ?: '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';
         $this->db = $db;
         $this->clinica = $clinica;
         $this->paciente = $paciente;
