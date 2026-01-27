@@ -13,11 +13,12 @@ import { BlockConflictDialog } from './BlockConflictDialog';
 interface Block {
   id: number;
   title: string;
-  day_of_week: number;
+  day_of_week?: number | null;
   start_time: string;
   end_time: string;
   recurring: boolean;
-  specific_date?: string;
+  specific_date?: string | null;
+  usuario_id?: number | null;
 }
 
 interface NewAppointmentModalProps {
