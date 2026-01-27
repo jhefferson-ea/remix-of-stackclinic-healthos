@@ -117,6 +117,28 @@ try {
             Response::success(['updated' => true], 'Configurações atualizadas');
         }
         
+        // Se tem instância salva, verificar se ainda existe na Evolution API
+        if ($clinica['evolution_instance_id']) {
+            $exists = $evolution->instanceExists();
+            
+            if (!$exists) {
+                // Instância não existe mais (404), limpar do banco
+                file_put_contents($debugLogFile, "WHATSAPP.PHP: Instância {$clinica['evolution_instance_id']} não existe mais, limpando banco...\n", FILE_APPEND);
+                
+                $stmt = $db->prepare("
+                    UPDATE clinica 
+                    SET evolution_instance_id = NULL, 
+                        whatsapp_connected = 0, 
+                        whatsapp_phone = NULL
+                    WHERE id = :id
+                ");
+                $stmt->execute([':id' => $clinicaId]);
+                
+                // Atualizar variável local para seguir fluxo de criar nova instância
+                $clinica['evolution_instance_id'] = null;
+            }
+        }
+        
         // Se não tem instância, cria uma nova
         if (!$clinica['evolution_instance_id']) {
             $createResult = $evolution->createInstance($clinicaId, $clinica['name']);

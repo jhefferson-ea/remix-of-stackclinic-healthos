@@ -265,6 +265,21 @@ class EvolutionService {
     }
     
     /**
+     * Verifica se a instância existe na Evolution API
+     * Retorna false se a API retornar 404 (instância não existe)
+     */
+    public function instanceExists() {
+        if (!$this->instanceId) {
+            return false;
+        }
+        
+        $response = $this->makeRequest("/instance/connectionState/{$this->instanceId}", 'GET');
+        
+        // Se retornou null, a instância não existe (404 ou erro)
+        return $response !== null;
+    }
+    
+    /**
      * Verifica status da conexão
      */
     public function getConnectionStatus() {
