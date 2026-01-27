@@ -571,6 +571,7 @@ class ApiService {
       session_phone: string;
       patient: { id: number; name: string; phone: string; is_lead: number };
       tokens_used: number;
+      error?: string;
       function_calls?: Array<{ function: string; arguments: Record<string, unknown>; result: Record<string, unknown> }>;
       appointment_created?: { date: string; time: string; procedure?: string };
     }>('/ai/simulate-chat', {

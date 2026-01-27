@@ -82,6 +82,7 @@ if (!$sessionPhone) {
 try {
     $database = new Database();
     $db = $database->getConnection();
+    $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
     
     // =========================================
     // 1. Busca dados da clínica
@@ -182,8 +183,19 @@ try {
     // =========================================
     // 6. Processa com OpenAI
     // =========================================
-    $openai = new OpenAIService($db, $clinica, $paciente);
-    $result = $openai->processMessage($message, $history);
+    try {
+        $openai = new OpenAIService($db, $clinica, $paciente);
+        $result = $openai->processMessage($message, $history);
+    } catch (Exception $aiError) {
+        error_log("Simulate Chat: Exception ao processar IA - " . $aiError->getMessage());
+        Response::success([
+            'response' => 'Desculpe, ocorreu um erro ao processar sua mensagem. Por favor, tente novamente.',
+            'error' => $aiError->getMessage(),
+            'session_phone' => $sessionPhone,
+            'patient' => $paciente
+        ]);
+        exit;
+    }
     
     if (!$result['success']) {
         error_log("Simulate Chat: Erro ao processar com IA - " . ($result['error'] ?? 'Unknown'));
@@ -193,6 +205,7 @@ try {
             'session_phone' => $sessionPhone,
             'patient' => $paciente
         ]);
+        exit;
     }
     
     $responseText = $result['response'];
