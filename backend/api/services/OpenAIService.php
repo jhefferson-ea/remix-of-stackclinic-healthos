@@ -46,10 +46,14 @@ class OpenAIService {
         // Faz a chamada para a OpenAI
         $response = $this->callOpenAI($messages, $tools);
         
-        if (!$response) {
+        // Verifica erros detalhados
+        if (!$response || isset($response['error'])) {
+            $errorMsg = $response['message'] ?? 'Falha ao conectar com a IA';
+            error_log("OpenAI Error Details: " . json_encode($response));
             return [
                 'success' => false,
-                'error' => 'Falha ao processar com IA'
+                'error' => $errorMsg,
+                'debug' => $response
             ];
         }
         
@@ -255,10 +259,14 @@ PROMPT;
         // Faz nova chamada para a IA processar os resultados
         $response = $this->callOpenAI($messages, $tools);
         
-        if (!$response) {
+        // Verifica erros detalhados na segunda chamada também
+        if (!$response || isset($response['error'])) {
+            $errorMsg = $response['message'] ?? 'Falha ao processar resultados das funções';
+            error_log("OpenAI Tool Results Error: " . json_encode($response));
             return [
                 'success' => false,
-                'error' => 'Falha ao processar resultados das funções'
+                'error' => $errorMsg,
+                'debug' => $response
             ];
         }
         
@@ -638,13 +646,22 @@ PROMPT;
         curl_close($ch);
         
         if ($error) {
-            error_log("OpenAI Error: " . $error);
-            return null;
+            error_log("OpenAI cURL Error: " . $error);
+            return [
+                'error' => true,
+                'http_code' => 0,
+                'message' => 'Erro de conexão: ' . $error
+            ];
         }
         
         if ($httpCode !== 200) {
             error_log("OpenAI HTTP Error {$httpCode}: " . $response);
-            return null;
+            $decoded = json_decode($response, true);
+            return [
+                'error' => true,
+                'http_code' => $httpCode,
+                'message' => $decoded['error']['message'] ?? "HTTP {$httpCode}: " . substr($response, 0, 200)
+            ];
         }
         
         return json_decode($response, true);
