@@ -81,7 +81,7 @@ export function AppointmentDetailModal({
   return (
     <>
       <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="w-[95vw] sm:w-full sm:max-w-lg max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Detalhes do Agendamento</DialogTitle>
             <DialogDescription className="sr-only">
@@ -90,13 +90,13 @@ export function AppointmentDetailModal({
           </DialogHeader>
 
           <div className="space-y-4 py-4">
-            <div className="flex items-center gap-3 p-3 rounded-lg bg-muted/50">
-              <div className="h-10 w-10 rounded-full bg-primary/10 flex items-center justify-center">
+            <div className="flex items-center gap-3 p-3 rounded-lg bg-muted/50 min-w-0">
+              <div className="h-10 w-10 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0">
                 <User className="h-5 w-5 text-primary" />
               </div>
-              <div>
-                <p className="font-medium text-foreground">{appointment.patient_name}</p>
-                <p className="text-sm text-muted-foreground">{appointment.patient_phone}</p>
+              <div className="min-w-0 flex-1">
+                <p className="font-medium text-foreground truncate">{appointment.patient_name}</p>
+                <p className="text-sm text-muted-foreground truncate">{appointment.patient_phone}</p>
               </div>
             </div>
 
@@ -117,34 +117,34 @@ export function AppointmentDetailModal({
               </div>
             </div>
 
-            <div className="flex items-center gap-2 p-3 rounded-lg border border-border">
-              <FileText className="h-4 w-4 text-muted-foreground" />
-              <div>
+            <div className="flex items-center gap-2 p-3 rounded-lg border border-border min-w-0">
+              <FileText className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+              <div className="min-w-0 flex-1">
                 <p className="text-xs text-muted-foreground">Procedimento</p>
-                <p className="text-sm font-medium">{appointment.procedure || 'Consulta'}</p>
+                <p className="text-sm font-medium break-words">{appointment.procedure || 'Consulta'}</p>
               </div>
             </div>
 
             {appointment.notes && (
               <div className="p-3 rounded-lg border border-border">
                 <p className="text-xs text-muted-foreground mb-1">Observações</p>
-                <p className="text-sm">{appointment.notes}</p>
+                <p className="text-sm break-words whitespace-pre-wrap">{appointment.notes}</p>
               </div>
             )}
           </div>
 
-          <DialogFooter className="flex-col sm:flex-row gap-2">
+          <DialogFooter className="flex-col gap-2 sm:flex-row">
             <Button
               variant="outline"
               onClick={() => onOpenChange(false)}
-              className="flex-1"
+              className="w-full sm:w-auto"
             >
               Fechar
             </Button>
             <Button
               variant="outline"
               onClick={() => setShowConversation(true)}
-              className="flex-1"
+              className="w-full sm:w-auto"
             >
               <MessageSquare className="h-4 w-4 mr-2" />
               Ver Conversa
@@ -153,14 +153,14 @@ export function AppointmentDetailModal({
               variant="destructive"
               onClick={() => setShowConfirmDelete(true)}
               disabled={isDeleting}
-              className="flex-1"
+              className="w-full sm:w-auto"
             >
               {isDeleting ? (
                 <Loader2 className="h-4 w-4 animate-spin mr-2" />
               ) : (
                 <Trash2 className="h-4 w-4 mr-2" />
               )}
-              Cancelar Agendamento
+              Cancelar
             </Button>
           </DialogFooter>
         </DialogContent>

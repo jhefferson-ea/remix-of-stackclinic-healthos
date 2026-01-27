@@ -33,6 +33,8 @@ class ApiService {
     const token = localStorage.getItem('stackclinic_token');
     if (token) {
       defaultHeaders['Authorization'] = `Bearer ${token}`;
+      // Fallback header para servidores que removem Authorization
+      defaultHeaders['X-Auth-Token'] = token;
     }
 
     try {

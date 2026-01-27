@@ -75,6 +75,7 @@ class Auth {
         $debugLog[] = "--- \$_SERVER vars ---";
         $debugLog[] = "HTTP_AUTHORIZATION: " . ($_SERVER['HTTP_AUTHORIZATION'] ?? 'NOT SET');
         $debugLog[] = "REDIRECT_HTTP_AUTHORIZATION: " . ($_SERVER['REDIRECT_HTTP_AUTHORIZATION'] ?? 'NOT SET');
+        $debugLog[] = "HTTP_X_AUTH_TOKEN: " . ($_SERVER['HTTP_X_AUTH_TOKEN'] ?? 'NOT SET');
         
         // 1. Tentar $_SERVER['HTTP_AUTHORIZATION'] (LiteSpeed/FastCGI com pass-through)
         if (!empty($_SERVER['HTTP_AUTHORIZATION'])) {
@@ -133,8 +134,25 @@ class Auth {
             file_put_contents($logFile, "TOKEN (primeiros 50 chars): " . substr($token, 0, 50) . "...\n\n", FILE_APPEND);
             return $token;
         }
+        
+        // 5. FALLBACK: Tentar X-Auth-Token (header alternativo que nao e removido pelo servidor)
+        $xAuthToken = $_SERVER['HTTP_X_AUTH_TOKEN'] ?? null;
+        if (!$xAuthToken && function_exists('getallheaders')) {
+            $headers = getallheaders();
+            foreach ($headers as $key => $value) {
+                if (strtolower($key) === 'x-auth-token') {
+                    $xAuthToken = $value;
+                    break;
+                }
+            }
+        }
+        
+        if ($xAuthToken) {
+            file_put_contents($logFile, "TOKEN EXTRAIDO VIA X-Auth-Token: SIM (len=" . strlen($xAuthToken) . ")\n\n", FILE_APPEND);
+            return $xAuthToken;
+        }
 
-        file_put_contents($logFile, "TOKEN EXTRAIDO: NAO (regex falhou ou authHeader vazio)\n", FILE_APPEND);
+        file_put_contents($logFile, "TOKEN EXTRAIDO: NAO (regex falhou e X-Auth-Token nao presente)\n", FILE_APPEND);
         file_put_contents($logFile, "authHeader para regex: '" . $authHeader . "'\n\n", FILE_APPEND);
         return null;
     }
