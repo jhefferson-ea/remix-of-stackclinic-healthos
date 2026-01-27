@@ -195,6 +195,7 @@ class EvolutionService {
     /**
      * Faz uma tentativa única de obter QR/pairingCode.
      * Útil para endpoints que vão fazer polling no frontend (evita timeouts no PHP).
+     * Se a instância estiver presa (count=0), faz logout e tenta novamente.
      */
     public function connectOnce($phone = null) {
         $debugLogFile = __DIR__ . '/../debug.log';
@@ -223,17 +224,35 @@ class EvolutionService {
         $qrcode = $this->extractQrFromResponse($resp);
         $pairing = $resp['pairingCode'] ?? null;
 
-        // 2) Algumas versões só "disparam" a geração do QR com POST.
-        // Se vier count=0 e ainda sem QR/pairing, tentamos POST uma vez.
+        // 2) Se vier count=0 (instância presa), faz logout para resetar e tenta novamente
         if (empty($qrcode) && empty($pairing) && isset($resp['count']) && (int)$resp['count'] === 0) {
-            $postResp = $this->makeRequest($endpoint, 'POST', []);
-            file_put_contents($debugLogFile, "CONNECT_ONCE: POST Response = " . json_encode($postResp) . "\n", FILE_APPEND);
+            file_put_contents($debugLogFile, "CONNECT_ONCE: count=0 detectado, fazendo logout para resetar...\n", FILE_APPEND);
+            
+            // Faz logout para resetar a sessão presa
+            $this->logoutInstance();
+            
+            // Aguarda 3 segundos para o logout processar
+            sleep(3);
+            
+            // Tenta novamente gerar QR após logout
+            $resp = $this->makeRequest($endpoint, 'GET');
+            file_put_contents($debugLogFile, "CONNECT_ONCE: Response após logout = " . json_encode($resp) . "\n", FILE_APPEND);
+            
+            if ($resp) {
+                $qrcode = $this->extractQrFromResponse($resp);
+                $pairing = $resp['pairingCode'] ?? null;
+            }
+            
+            // Se ainda não tiver QR, tenta POST como fallback
+            if (empty($qrcode) && empty($pairing)) {
+                $postResp = $this->makeRequest($endpoint, 'POST', []);
+                file_put_contents($debugLogFile, "CONNECT_ONCE: POST Response após logout = " . json_encode($postResp) . "\n", FILE_APPEND);
 
-            if ($postResp) {
-                $qrcode = $qrcode ?: $this->extractQrFromResponse($postResp);
-                $pairing = $pairing ?: ($postResp['pairingCode'] ?? null);
-                // substitui resp para devolver count consistente
-                $resp = $postResp;
+                if ($postResp) {
+                    $qrcode = $qrcode ?: $this->extractQrFromResponse($postResp);
+                    $pairing = $pairing ?: ($postResp['pairingCode'] ?? null);
+                    $resp = $postResp;
+                }
             }
         }
 
