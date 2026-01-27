@@ -96,8 +96,10 @@ try {
     }
     
     // =========================================
-    // 2. Busca ou cria paciente simulado
+    // 2. Busca paciente existente (NÃO cria automaticamente)
     // =========================================
+    // Paciente só será criado quando houver agendamento confirmado
+    // Por enquanto, apenas busca se já existe
     $stmt = $db->prepare("
         SELECT * FROM pacientes 
         WHERE clinica_id = :clinica_id AND phone = :phone
@@ -107,81 +109,41 @@ try {
         ':clinica_id' => $clinicaId,
         ':phone' => $sessionPhone
     ]);
-    $paciente = $stmt->fetch();
-    
-    if (!$paciente) {
-        // Cria paciente simulado como Lead
-        $stmt = $db->prepare("
-            INSERT INTO pacientes (clinica_id, name, phone, is_lead, lead_source, created_at)
-            VALUES (:clinica_id, :name, :phone, 1, 'simulator', NOW())
-        ");
-        $stmt->execute([
-            ':clinica_id' => $clinicaId,
-            ':name' => 'Simulador ' . date('d/m H:i'),
-            ':phone' => $sessionPhone
-        ]);
-        
-        $pacienteId = $db->lastInsertId();
-        $paciente = [
-            'id' => $pacienteId,
-            'name' => 'Simulador ' . date('d/m H:i'),
-            'phone' => $sessionPhone,
-            'is_lead' => 1
-        ];
-    }
+    $paciente = $stmt->fetch() ?: null; // null se não existir
     
     // =========================================
-    // 3. Salva mensagem recebida
+    // 3. Recupera histórico da sessão (usando tabela de sessão, não whatsapp_messages)
     // =========================================
+    // Para simulador, usamos uma tabela temporária ou o contexto da sessão
     $stmt = $db->prepare("
-        INSERT INTO whatsapp_messages (clinica_id, paciente_id, phone, direction, message, message_type, created_at)
-        VALUES (:clinica_id, :paciente_id, :phone, 'incoming', :message, 'text', NOW())
-    ");
-    $stmt->execute([
-        ':clinica_id' => $clinicaId,
-        ':paciente_id' => $paciente['id'],
-        ':phone' => $sessionPhone,
-        ':message' => $message
-    ]);
-    
-    // =========================================
-    // 4. Verifica se está transferido para humano
-    // =========================================
-    $stmt = $db->prepare("
-        SELECT * FROM whatsapp_sessions 
+        SELECT context FROM whatsapp_sessions 
         WHERE clinica_id = :clinica_id AND phone = :phone
         LIMIT 1
     ");
     $stmt->execute([':clinica_id' => $clinicaId, ':phone' => $sessionPhone]);
     $session = $stmt->fetch();
     
-    if ($session && $session['transferred_to_human']) {
+    $history = [];
+    $conversationContext = [];
+    
+    if ($session && $session['context']) {
+        $conversationContext = json_decode($session['context'], true) ?? [];
+        $history = $conversationContext['messages'] ?? [];
+    }
+    
+    // Verifica se está transferido para humano
+    if ($session && ($session['transferred_to_human'] ?? false)) {
         Response::success([
             'response' => '[Conversa transferida para atendente humano]',
             'transferred' => true,
             'session_phone' => $sessionPhone,
             'patient' => $paciente
         ]);
+        exit;
     }
     
     // =========================================
-    // 5. Recupera histórico (últimas 10 mensagens)
-    // =========================================
-    $stmt = $db->prepare("
-        SELECT direction, message 
-        FROM whatsapp_messages 
-        WHERE clinica_id = :clinica_id AND phone = :phone
-        ORDER BY created_at DESC
-        LIMIT 10
-    ");
-    $stmt->execute([':clinica_id' => $clinicaId, ':phone' => $sessionPhone]);
-    $history = array_reverse($stmt->fetchAll());
-    
-    // Remove a mensagem atual do histórico (já será adicionada pelo OpenAIService)
-    array_pop($history);
-    
-    // =========================================
-    // 6. Processa com OpenAI
+    // 4. Processa com OpenAI
     // =========================================
     try {
         $openai = new OpenAIService($db, $clinica, $paciente);
@@ -211,47 +173,57 @@ try {
     $responseText = $result['response'];
     
     // =========================================
-    // 7. Salva resposta
+    // 5. Atualiza histórico na sessão (não cria registros em pacientes)
     // =========================================
-    $stmt = $db->prepare("
-        INSERT INTO whatsapp_messages (clinica_id, paciente_id, phone, direction, message, message_type, ai_processed, function_calls, tokens_used, created_at)
-        VALUES (:clinica_id, :paciente_id, :phone, 'outgoing', :message, 'text', 1, :function_calls, :tokens_used, NOW())
-    ");
-    $stmt->execute([
-        ':clinica_id' => $clinicaId,
-        ':paciente_id' => $paciente['id'],
-        ':phone' => $sessionPhone,
-        ':message' => $responseText,
-        ':function_calls' => $result['function_calls'] ? json_encode($result['function_calls']) : null,
-        ':tokens_used' => $result['tokens_used'] ?? 0
-    ]);
+    $history[] = ['direction' => 'incoming', 'message' => $message];
+    $history[] = ['direction' => 'outgoing', 'message' => $responseText];
+    
+    // Mantém apenas últimas 20 mensagens no contexto
+    if (count($history) > 20) {
+        $history = array_slice($history, -20);
+    }
+    
+    $conversationContext['messages'] = $history;
+    $conversationContext['last_activity'] = date('Y-m-d H:i:s');
     
     // =========================================
-    // 8. Atualiza/cria sessão
-    // =========================================
-    $stmt = $db->prepare("
-        INSERT INTO whatsapp_sessions (clinica_id, phone, paciente_id, status, last_activity)
-        VALUES (:clinica_id, :phone, :paciente_id, 'active', NOW())
-        ON DUPLICATE KEY UPDATE last_activity = NOW(), paciente_id = :paciente_id2
-    ");
-    $stmt->execute([
-        ':clinica_id' => $clinicaId,
-        ':phone' => $sessionPhone,
-        ':paciente_id' => $paciente['id'],
-        ':paciente_id2' => $paciente['id']
-    ]);
-    
-    // =========================================
-    // 9. Verifica se criou agendamento
+    // 6. Verifica se agendamento foi criado - só então cria paciente
     // =========================================
     $appointmentCreated = null;
     if ($result['function_calls']) {
         foreach ($result['function_calls'] as $call) {
             if ($call['function'] === 'createAppointment' && ($call['result']['success'] ?? false)) {
                 $appointmentCreated = $call['result'];
+                
+                // Agora sim, busca o paciente criado pelo OpenAIService
+                if (isset($call['result']['patient_id'])) {
+                    $stmt = $db->prepare("SELECT * FROM pacientes WHERE id = :id LIMIT 1");
+                    $stmt->execute([':id' => $call['result']['patient_id']]);
+                    $paciente = $stmt->fetch() ?: null;
+                }
             }
         }
     }
+    
+    // =========================================
+    // 7. Atualiza/cria sessão com contexto
+    // =========================================
+    $stmt = $db->prepare("
+        INSERT INTO whatsapp_sessions (clinica_id, phone, paciente_id, context, status, last_activity)
+        VALUES (:clinica_id, :phone, :paciente_id, :context, 'active', NOW())
+        ON DUPLICATE KEY UPDATE 
+            context = :context2, 
+            last_activity = NOW(), 
+            paciente_id = COALESCE(:paciente_id2, paciente_id)
+    ");
+    $stmt->execute([
+        ':clinica_id' => $clinicaId,
+        ':phone' => $sessionPhone,
+        ':paciente_id' => $paciente ? $paciente['id'] : null,
+        ':context' => json_encode($conversationContext),
+        ':context2' => json_encode($conversationContext),
+        ':paciente_id2' => $paciente ? $paciente['id'] : null
+    ]);
     
     Response::success([
         'response' => $responseText,
