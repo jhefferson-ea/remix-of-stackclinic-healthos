@@ -1,172 +1,252 @@
 
+# Plano: Refatoração Completa da IA do Chat Simulator
 
-# Plano: Melhorar Qualidade das Respostas da IA no Chat Simulator
+## Problemas Identificados
 
-## Problema Identificado
+### 1. **IA "Alucinando" e Repetindo Perguntas**
+- O prompt atual não mantém estado da conversa de forma explícita
+- A IA não sabe em qual etapa do fluxo está
+- O histórico de mensagens é passado mas sem contexto estruturado
+- A IA recebe tools demais (getPatientInfo não faz sentido no contexto do simulador)
 
-As respostas da IA estão "perdidas" e incoerentes porque:
-1. O **system prompt** é muito genérico e não guia a IA sobre como conduzir uma conversa
-2. A **temperatura** está em 0.7 (alta demais para atendimento)
-3. Faltam **instruções de fluxo** - quando perguntar o quê, em que ordem
-4. A IA não sabe que está **simulando WhatsApp** onde o cliente pode ser novo
+### 2. **IA Alterou Nome da Clínica**
+- **BUG CRÍTICO**: A função `createAppointment` usa `$clinica['name']` que pode estar sendo passado de forma incorreta
+- Possível SQL injection via argumentos da IA (ex: IA passa `patient_name` contendo SQL)
+- Não há sanitização dos dados vindos da IA
+
+### 3. **Falta Validação da Agenda do Profissional**
+- O sistema está consultando `horario_funcionamento` mas não valida se há bloqueios específicos
+- A tabela `agendamentos` tem `usuario_id` (profissional) mas a IA não usa isso
+- Como você confirmou que é "Por Clínica", precisamos garantir que `usuario_id` seja NULL ou um default
+
+### 4. **Tools Desnecessárias**
+- `getPatientInfo` não deve existir (paciente só é criado ao confirmar agendamento)
+- Falta sanitização nos argumentos das tools
 
 ---
 
-## Solução
+## Solução Proposta
 
-Reescrever o `buildSystemMessage()` com um prompt estruturado que:
-- Define claramente a persona e contexto
-- Estabelece um fluxo de conversa lógico
-- Dá exemplos de interações
-- Reduz a temperatura para respostas mais consistentes
-
----
-
-## Arquivos a Modificar
+### Arquivos a Modificar
 
 | Arquivo | Alteração |
 |---------|-----------|
-| `backend/api/services/OpenAIService.php` | Reescrever system prompt e reduzir temperatura |
+| `backend/api/services/OpenAIService.php` | Refatoração completa do prompt, remoção de tools desnecessárias, adição de estado de conversa, sanitização |
 
 ---
 
 ## Detalhes Técnicos
 
-### 1. Novo System Prompt (método `buildSystemMessage`)
+### 1. Remover Tool `getPatientInfo`
+
+A tool `getPatientInfo` não faz sentido porque:
+- O paciente só é criado ao confirmar agendamento (regra que você escolheu)
+- No contexto do WhatsApp, a pessoa é desconhecida até informar o nome
+
+```php
+// REMOVER esta tool do array getAvailableTools():
+[
+    'type' => 'function',
+    'function' => [
+        'name' => 'getPatientInfo',
+        // ...
+    ]
+]
+```
+
+### 2. Novo System Prompt com Máquina de Estados
+
+O problema principal é que a IA não sabe "em qual passo está". Vamos criar um prompt que force a IA a seguir uma máquina de estados:
 
 ```php
 $systemPrompt = <<<PROMPT
 # IDENTIDADE
-Você é {$aiName}, atendente virtual da {$clinicName}.
+Você é {$aiName}, atendente virtual da clínica {$clinicName}.
 Especialidade: {$category}
-Data de hoje: {$currentDate} ({$currentDayName})
-Hora atual: {$currentTime}
 
-# CONTEXTO
-Você está conversando via WhatsApp. O cliente pode ser um paciente existente ou alguém novo que nunca veio à clínica.
+# DATA E HORA ATUAL
+Hoje: {$currentDate} ({$currentDayName})
+Agora: {$currentTime}
 
 # INFORMAÇÕES DA CLÍNICA
-Endereço: {$address}
-Telefone: {$phone}
+- Endereço: {$address}
+- Telefone: {$phone}
 
-# PROCEDIMENTOS E PREÇOS
+# PROCEDIMENTOS DISPONÍVEIS (use exatamente estes nomes)
 {$proceduresList}
 
 # HORÁRIOS DE FUNCIONAMENTO
 {$workingHours}
 
-# TOM DE COMUNICAÇÃO
-{$toneInstruction}
+# TOM: {$toneInstruction}
 
-# REGRAS IMPORTANTES
+# FLUXO DE AGENDAMENTO (SIGA RIGOROSAMENTE)
 
-## Saudações
-- Quando o cliente disser "oi", "olá", "bom dia", etc., responda de forma acolhedora e pergunte como pode ajudar.
-- Exemplo: "Olá! Bem-vindo(a) à {$clinicName}! Sou {$aiName}, como posso ajudar você hoje?"
+Você deve seguir EXATAMENTE esta sequência para agendar:
 
-## Agendamentos
-1. Se o cliente quiser agendar, pergunte PRIMEIRO qual procedimento/serviço deseja
-2. Depois pergunte para qual data prefere
-3. Use checkAvailability para buscar horários disponíveis
-4. Ofereça as opções de horário de forma resumida (máximo 5-6 horários por vez)
-5. Quando o cliente escolher horário, pergunte o NOME COMPLETO dele
-6. Só chame createAppointment quando tiver: data, hora e nome do cliente
+**PASSO 1 - SAUDAÇÃO**
+Se o cliente mandou "oi", "olá", "bom dia", etc:
+→ Responda: "Olá! Sou {$aiName} da {$clinicName}. Como posso ajudar?"
+→ NÃO pergunte mais nada, aguarde a resposta.
 
-## Informações
-- Só forneça preços e informações que estão listados acima
-- Se perguntarem algo que você não sabe, diga que vai verificar com a equipe
+**PASSO 2 - PROCEDIMENTO**
+Se o cliente quer agendar mas não disse qual procedimento:
+→ Pergunte: "Qual procedimento você gostaria de agendar?"
+→ Se ele disser algo que não está na lista, diga que vai verificar com a equipe.
 
-## Transferência
-- Se o cliente pedir para falar com atendente/humano/secretária, use transferToHuman
-- Se a conversa ficar muito complexa ou o cliente ficar frustrado, ofereça transferir
+**PASSO 3 - DATA**
+Se o cliente já escolheu o procedimento mas não a data:
+→ Pergunte: "Para qual data você prefere?"
+→ Aceite "amanhã", "segunda", datas específicas, etc.
 
-## Respostas
-- Seja OBJETIVO e DIRETO
-- Use frases curtas (máximo 3 frases por resposta quando possível)
-- Não repita informações que já foram ditas
-- Não faça múltiplas perguntas de uma vez - uma pergunta por mensagem
+**PASSO 4 - VERIFICAR HORÁRIOS**
+Se o cliente informou a data:
+→ Use a função checkAvailability com a data
+→ Mostre no máximo 5 horários disponíveis
+→ Pergunte qual horário prefere
+
+**PASSO 5 - NOME**
+Se o cliente escolheu o horário:
+→ Pergunte: "Para finalizar, preciso do seu nome completo."
+
+**PASSO 6 - CONFIRMAR**
+Somente quando tiver: procedimento + data + horário + nome:
+→ Use a função createAppointment
+→ Confirme o agendamento com os dados
+
+# REGRAS ABSOLUTAS
+
+1. NUNCA pule passos - siga a ordem exata
+2. NUNCA faça duas perguntas na mesma mensagem
+3. NUNCA invente procedimentos ou preços
+4. NUNCA chame createAppointment sem ter o nome do cliente
+5. Se não entendeu algo, peça para o cliente repetir
+6. Se o cliente pedir para falar com humano, use transferToHuman
+
+# EXEMPLOS DE INTERAÇÕES CORRETAS
+
+Exemplo 1:
+Cliente: oi
+IA: Olá! Sou {$aiName} da {$clinicName}. Como posso ajudar?
+
+Cliente: quero agendar
+IA: Qual procedimento você gostaria de agendar?
+
+Cliente: limpeza
+IA: Ótimo! Para qual data você prefere a limpeza?
+
+Cliente: amanhã
+IA: [chama checkAvailability] Temos horários às 09:00, 10:00, 14:00, 15:00 e 16:00. Qual prefere?
+
+Cliente: 14h
+IA: Perfeito! Para finalizar, preciso do seu nome completo.
+
+Cliente: João Silva
+IA: [chama createAppointment] Pronto! Agendamento confirmado: Limpeza em 28/01/2026 às 14:00 para João Silva. Até lá!
 
 {$customPrompt}
 PROMPT;
 ```
 
-### 2. Reduzir Temperatura (método `callOpenAI`)
+### 3. Sanitização de Dados da IA
+
+Antes de usar qualquer dado vindo da IA em queries SQL:
+
+```php
+private function createAppointment($date, $time, $procedureName, $patientName, $patientPhone, $clinicaId) {
+    // SANITIZAÇÃO - impede SQL injection e valores maliciosos
+    $patientName = trim(strip_tags($patientName ?? ''));
+    $procedureName = trim(strip_tags($procedureName ?? ''));
+    $patientPhone = preg_replace('/[^0-9]/', '', $patientPhone ?? '');
+    
+    // Validação de formato de data
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
+        return ['success' => false, 'error' => 'Formato de data inválido'];
+    }
+    
+    // Validação de formato de hora
+    if (!preg_match('/^\d{2}:\d{2}$/', $time)) {
+        return ['success' => false, 'error' => 'Formato de hora inválido'];
+    }
+    
+    // Validação de nome (mínimo 3 caracteres)
+    if (strlen($patientName) < 3) {
+        return ['success' => false, 'error' => 'Nome do paciente é obrigatório'];
+    }
+    
+    // ... resto do código
+}
+```
+
+### 4. Correção do INSERT de Agendamento
+
+O INSERT atual usa `patient_id` mas a tabela tem `paciente_id`:
+
+```php
+// ANTES (incorreto):
+$stmt = $this->db->prepare("
+    INSERT INTO agendamentos (clinica_id, patient_id, date, time, ...)
+");
+
+// DEPOIS (correto - verificar nome real da coluna):
+$stmt = $this->db->prepare("
+    INSERT INTO agendamentos (clinica_id, paciente_id, date, time, duration, `procedure`, procedimento_id, status, notes)
+    VALUES (:clinica_id, :paciente_id, :date, :time, :duration, :procedure, :procedimento_id, 'confirmed', 'Agendado via WhatsApp')
+");
+```
+
+### 5. Adicionar Logs de Debug
+
+Para ajudar a identificar problemas futuros:
+
+```php
+private function processMessage($message, $conversationHistory = []) {
+    $systemMessage = $this->buildSystemMessage();
+    
+    // LOG: Ver o prompt completo
+    error_log("===== OPENAI SYSTEM PROMPT =====");
+    error_log($systemMessage);
+    error_log("===== HISTÓRICO (" . count($conversationHistory) . " mensagens) =====");
+    error_log(json_encode($conversationHistory));
+    
+    // ... resto do código
+}
+```
+
+### 6. Ajustar Parâmetros da OpenAI
 
 ```php
 $data = [
     'model' => $this->model,
     'messages' => $messages,
-    'temperature' => 0.3,  // Era 0.7 - mais consistente agora
-    'max_tokens' => 500    // Era 1000 - respostas mais concisas
+    'temperature' => 0.2,  // AINDA MAIS BAIXA para consistência máxima
+    'max_tokens' => 400,   // Respostas mais curtas = menos divagação
+    'presence_penalty' => 0.1,  // Evita repetição
+    'frequency_penalty' => 0.1  // Evita repetição de frases
 ];
 ```
 
-### 3. Adicionar nome do dia da semana
-
-```php
-$currentDate = date('d/m/Y');
-$currentTime = date('H:i');
-$daysOfWeek = ['domingo', 'segunda-feira', 'terça-feira', 'quarta-feira', 'quinta-feira', 'sexta-feira', 'sábado'];
-$currentDayName = $daysOfWeek[date('w')];
-```
-
 ---
 
-## Comparação Antes x Depois
+## Resumo das Mudanças
 
-| Aspecto | Antes | Depois |
-|---------|-------|--------|
-| Temperatura | 0.7 (criativo) | 0.3 (consistente) |
-| Max tokens | 1000 | 500 |
-| Fluxo de agendamento | Genérico | Passo a passo detalhado |
-| Saudações | Não mencionado | Exemplo incluído |
-| Tom de resposta | Não definido | "Objetivo e direto, frases curtas" |
-| Dia da semana | Não incluído | Incluído para contexto de agenda |
-
----
-
-## Exemplo de Fluxo Esperado
-
-**Antes (problemático):**
-```
-Usuário: oi
-IA: [resposta confusa ou tentando agendar direto]
-```
-
-**Depois (esperado):**
-```
-Usuário: oi
-IA: Olá! Bem-vindo(a) à Clínica Exemplo! Sou Ana, como posso ajudar você hoje?
-
-Usuário: quero agendar consulta
-IA: Claro! Qual procedimento você gostaria de agendar?
-
-Usuário: limpeza dental
-IA: Ótimo! Para qual data você prefere?
-
-Usuário: amanhã
-IA: [chama checkAvailability] 
-    Temos os seguintes horários disponíveis amanhã: 09:00, 10:00, 14:00, 15:00, 16:00. Qual prefere?
-
-Usuário: 14:00
-IA: Perfeito! Para confirmar o agendamento, preciso do seu nome completo.
-
-Usuário: João Silva
-IA: [chama createAppointment]
-    Pronto! Seu agendamento está confirmado:
-    📅 Limpeza Dental
-    📆 28/01/2026 às 14:00
-    
-    Até lá!
-```
+| Mudança | Impacto |
+|---------|---------|
+| Remover `getPatientInfo` | Evita erros de tool call desnecessária |
+| Novo prompt com máquina de estados | IA segue fluxo passo a passo |
+| Exemplos de diálogo no prompt | IA aprende por exemplo |
+| Sanitização de dados | Segurança contra SQL injection |
+| Correção do INSERT | Evita erros de coluna inexistente |
+| Temperature 0.2 | Respostas mais previsíveis |
+| Logs de debug | Facilita troubleshooting |
 
 ---
 
 ## Teste de Validação
 
-1. Enviar "oi" - deve receber saudação amigável
-2. Enviar "quero agendar" - deve perguntar qual procedimento
-3. Seguir o fluxo até confirmar agendamento
-4. Verificar se as respostas são curtas e objetivas
-5. Verificar se a IA não faz múltiplas perguntas de uma vez
-
+1. Limpar sessão do simulador
+2. Enviar "oi" → deve receber saudação curta
+3. Enviar "quero agendar" → deve perguntar qual procedimento
+4. Seguir o fluxo até confirmar agendamento
+5. Verificar se paciente foi criado SOMENTE após agendamento
+6. Verificar se o nome da clínica NÃO foi alterado
