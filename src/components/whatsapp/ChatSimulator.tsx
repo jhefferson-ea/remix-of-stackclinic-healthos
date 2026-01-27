@@ -67,10 +67,17 @@ export default function ChatSimulator() {
           setSessionPhone(res.data.session_phone);
         }
 
+        // Se veio erro junto com a resposta, mostra no console para debug
+        if (res.data.error) {
+          console.error('AI Processing Error:', res.data.error);
+        }
+
         const aiMessage: Message = {
           id: `ai-${Date.now()}`,
           role: 'assistant',
-          content: res.data.response,
+          content: res.data.error 
+            ? `${res.data.response}\n\n🔴 Debug: ${res.data.error}` 
+            : res.data.response,
           timestamp: new Date(),
           appointmentCreated: res.data.appointment_created,
         };
