@@ -19,25 +19,38 @@ $db = $database->getConnection();
 $clinicaId = Tenant::getClinicId();
 
 try {
+    $professionalId = isset($_GET['professional_id']) ? (int)$_GET['professional_id'] : null;
+    
+    // Build professional filter
+    $profFilter = '';
+    $profFilterPayments = '';
+    if ($professionalId) {
+        $profFilter = ' AND usuario_id = ' . $professionalId;
+        $profFilterPayments = ' AND pp.usuario_id = ' . $professionalId;
+    }
+    
     // Total de receitas (mês atual) from financeiro_transacoes
-    $stmt = $db->prepare("
+    $sql = "
         SELECT COALESCE(SUM(value), 0) as total 
         FROM financeiro_transacoes 
         WHERE clinica_id = :clinica_id AND type = 'entrada' 
         AND MONTH(date) = MONTH(CURDATE()) 
         AND YEAR(date) = YEAR(CURDATE())
-    ");
+    ";
+    $stmt = $db->prepare($sql);
     $stmt->execute([':clinica_id' => $clinicaId]);
     $transactionRevenue = (float) $stmt->fetch()['total'];
 
     // Total de procedimentos pagos (mês atual) from pagamentos_procedimentos
-    $stmt = $db->prepare("
-        SELECT COALESCE(SUM(amount), 0) as total 
-        FROM pagamentos_procedimentos 
-        WHERE clinica_id = :clinica_id AND status = 'pago' 
-        AND MONTH(payment_date) = MONTH(CURDATE()) 
-        AND YEAR(payment_date) = YEAR(CURDATE())
-    ");
+    $sql = "
+        SELECT COALESCE(SUM(pp.amount), 0) as total 
+        FROM pagamentos_procedimentos pp
+        WHERE pp.clinica_id = :clinica_id AND pp.status = 'pago' 
+        AND MONTH(pp.payment_date) = MONTH(CURDATE()) 
+        AND YEAR(pp.payment_date) = YEAR(CURDATE())
+        {$profFilterPayments}
+    ";
+    $stmt = $db->prepare($sql);
     $stmt->execute([':clinica_id' => $clinicaId]);
     $procedureRevenue = (float) $stmt->fetch()['total'];
 
@@ -55,11 +68,13 @@ try {
     $totalExpenses = (float) $stmt->fetch()['total'];
 
     // Pagamentos pendentes de procedimentos
-    $stmt = $db->prepare("
-        SELECT COALESCE(SUM(amount), 0) as total 
-        FROM pagamentos_procedimentos 
-        WHERE clinica_id = :clinica_id AND status IN ('a_receber', 'pendente')
-    ");
+    $sql = "
+        SELECT COALESCE(SUM(pp.amount), 0) as total 
+        FROM pagamentos_procedimentos pp
+        WHERE pp.clinica_id = :clinica_id AND pp.status IN ('a_receber', 'pendente')
+        {$profFilterPayments}
+    ";
+    $stmt = $db->prepare($sql);
     $stmt->execute([':clinica_id' => $clinicaId]);
     $pendingPayments = (float) $stmt->fetch()['total'];
 

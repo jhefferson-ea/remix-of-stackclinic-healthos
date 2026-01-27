@@ -25,6 +25,7 @@ try {
         $date = $_GET['date'] ?? null;
         $status = $_GET['status'] ?? null;
         $period = $_GET['period'] ?? null;
+        $professionalId = isset($_GET['professional_id']) ? (int)$_GET['professional_id'] : null;
         
         $where = ["pp.clinica_id = :clinica_id"];
         $params = [':clinica_id' => $clinicaId];
@@ -51,14 +52,22 @@ try {
             $where[] = "pp.appointment_date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)";
         }
         
+        // Filter by professional
+        if ($professionalId) {
+            $where[] = "pp.usuario_id = :professional_id";
+            $params[':professional_id'] = $professionalId;
+        }
+        
         $whereClause = 'WHERE ' . implode(' AND ', $where);
         
         $sql = "
             SELECT pp.id, pp.agendamento_id, pp.patient_id, pp.patient_name, 
                    pp.procedure_name, pp.amount, pp.status, 
                    pp.appointment_date as date, TIME_FORMAT(pp.appointment_time, '%H:%i') as time,
-                   pp.payment_date, pp.created_at
+                   pp.payment_date, pp.created_at,
+                   pp.usuario_id as professional_id, u.name as professional_name
             FROM pagamentos_procedimentos pp
+            LEFT JOIN usuarios u ON pp.usuario_id = u.id
             {$whereClause}
             ORDER BY pp.appointment_date DESC, pp.appointment_time DESC
         ";
@@ -72,6 +81,7 @@ try {
             $payment['agendamento_id'] = (int) $payment['agendamento_id'];
             $payment['patient_id'] = (int) $payment['patient_id'];
             $payment['amount'] = (float) $payment['amount'];
+            $payment['professional_id'] = $payment['professional_id'] ? (int) $payment['professional_id'] : null;
         }
         
         Response::success($payments);
