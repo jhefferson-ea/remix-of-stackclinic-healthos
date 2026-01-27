@@ -1,207 +1,124 @@
 
+## O que está acontecendo (causa raiz)
 
-# Plano: Consertar a IA para Conversar Corretamente
+O seu “estado explícito” até foi implementado, mas ele **não está sendo recuperado** entre mensagens na prática por um motivo bem específico:
 
-## Diagnóstico Técnico
+- A coluna `phone` nas tabelas `whatsapp_sessions` e `whatsapp_messages` é `VARCHAR(20)`.
+- No simulador, o backend gera `session_phone` assim: `SIMULATOR_{clinicaId}_{time()}`.
+- Isso **passa de 20 caracteres**, então o MySQL salva **truncado**.
+- Na próxima mensagem, o frontend manda o `session_phone` completo (não truncado), e o SELECT:
+  ```sql
+  WHERE phone = :phone
+  ```
+  **não encontra a sessão** (porque no banco está truncado).
+- Resultado: a cada mensagem, o backend “acha” que é uma conversa nova → `collected_data` volta tudo para `null` → a IA volta a perguntar “Qual procedimento deseja?” mesmo após já ter entendido “consulta”.
 
-### Bug 1: Estado não persiste entre mensagens
-O método `processMessageWithState` retorna `$collectedData` sem atualizações. Os dados que a IA extrai da conversa são **perdidos**.
+Isso casa exatamente com o seu exemplo:
+- Ela entendeu “dor na mandíbula” e perguntou data (naquele turno).
+- No turno seguinte, perdeu o estado (sessão não carregada) e voltou a pedir procedimento.
 
-### Bug 2: Extração de procedimento falha para sintomas
-"Dor no siso" não casa com nenhum procedimento cadastrado. A extração retorna `null`, mas a IA **inventa** um procedimento em vez de perguntar.
+## Objetivo do ajuste
 
-### Bug 3: A IA ignora as instruções do prompt
-Mesmo recebendo "Procedimento: ❌ NÃO INFORMADO", a IA responde sugerindo "canal" - alucinação típica do GPT-4o-mini.
+Fazer o simulador usar um identificador de sessão que:
+1) **caiba em `VARCHAR(20)`**, e
+2) seja **usado consistentemente** em todos os SELECT/INSERT/DELETE, e
+3) seja o mesmo que devolvemos para o frontend (para o frontend sempre mandar o “phone real” do banco).
 
-### Bug 4: Regra de negócio não implementada
-Cliente disse "dor no siso" → deveria ser tratado como **Consulta**, não como sugestão de procedimento.
-
----
-
-## Solução
-
-### Arquivos a Modificar
-
-| Arquivo | Alteração |
-|---------|-----------|
-| `backend/api/services/OpenAIService.php` | Corrigir extração, atualizar estado, melhorar prompt |
-| `backend/api/ai/simulate-chat.php` | Pequenos ajustes de persistência |
-
----
-
-## Mudanças Técnicas
-
-### 1. Nova Regra: Sintomas → Consulta
-
-Quando o cliente descreve um problema (dor, desconforto, inchaço, etc.) sem pedir um procedimento específico, o sistema deve tratar como "Consulta" automaticamente.
-
-```php
-// Em extractDataFromMessage()
-$symptomKeywords = ['dor', 'doendo', 'inchado', 'sangr', 'quebr', 'caiu', 'mole'];
-$hasSymptom = false;
-foreach ($symptomKeywords as $kw) {
-    if (stripos($messageLower, $kw) !== false) {
-        $hasSymptom = true;
-        break;
-    }
-}
-
-// Se tem sintoma e NÃO pediu procedimento específico → Consulta
-if ($hasSymptom && empty($extracted['procedure'])) {
-    $extracted['procedure'] = 'Consulta';
-    $extracted['procedure_id'] = null; // Busca depois
-}
-```
-
-### 2. Aliases para Procedimentos
-
-Criar mapeamento de termos comuns para procedimentos reais.
-
-```php
-private function findProcedureByAlias($term, $clinicaId) {
-    $aliases = [
-        'canal' => ['canal', 'endodontia', 'tratamento de canal'],
-        'siso' => ['siso', 'extração', 'terceiro molar', 'dente do juízo'],
-        'limpeza' => ['limpeza', 'profilaxia', 'tartaro'],
-        'clareamento' => ['clareamento', 'branqueamento'],
-        'implante' => ['implante', 'implant'],
-        'ortodontia' => ['aparelho', 'ortodont', 'alinhar'],
-        'consulta' => ['consulta', 'avaliação', 'avaliaç', 'checkup', 'check-up']
-    ];
-    
-    $termLower = mb_strtolower($term, 'UTF-8');
-    
-    foreach ($aliases as $category => $terms) {
-        foreach ($terms as $alias) {
-            if (stripos($termLower, $alias) !== false) {
-                // Busca procedimento que contenha a categoria
-                $stmt = $this->db->prepare("
-                    SELECT id, name, duration FROM procedimentos 
-                    WHERE clinica_id = :cid AND active = 1 
-                    AND (name LIKE :term1 OR name LIKE :term2)
-                    LIMIT 1
-                ");
-                $stmt->execute([
-                    ':cid' => $clinicaId, 
-                    ':term1' => "%{$category}%",
-                    ':term2' => "%{$alias}%"
-                ]);
-                $proc = $stmt->fetch();
-                if ($proc) return $proc;
-            }
-        }
-    }
-    return null;
-}
-```
-
-### 3. Atualizar Estado na Resposta
-
-O método `processMessageWithState` precisa atualizar `collected_data` com dados que a IA extraiu via tool calls.
-
-```php
-// Em handleToolCalls()
-if ($result['function_calls']) {
-    foreach ($result['function_calls'] as $call) {
-        if ($call['function'] === 'checkAvailability') {
-            // Se chamou checkAvailability, a data está confirmada
-            $collectedData['date'] = $call['arguments']['date'] ?? $collectedData['date'];
-        }
-        if ($call['function'] === 'createAppointment' && $call['result']['success']) {
-            // Limpa após sucesso
-            $collectedData = [...reset...];
-        }
-    }
-}
-$result['collected_data'] = $collectedData; // AGORA RETORNA ATUALIZADO
-```
-
-### 4. Prompt Mais Rígido (Anti-Alucinação)
-
-```php
-$systemPrompt = <<<PROMPT
-Você é {$aiName}, atendente da {$clinicName}. HOJE: {$currentDate} ({$currentDayName}) às {$currentTime}
-
-PROCEDIMENTOS:
-{$proceduresList}
-
-# ESTADO ATUAL DA CONVERSA
-{$stateInfo}
-
-# REGRAS ABSOLUTAS (SIGA OU A CONVERSA FALHARÁ)
-
-1. NUNCA SUGIRA procedimentos. Se o cliente descrever sintomas, trate como "Consulta".
-2. Se "Procedimento" está como NÃO INFORMADO acima, você DEVE perguntar: "Qual procedimento deseja agendar?"
-3. APENAS uma pergunta por mensagem. MÁXIMO 2 frases.
-4. Use checkAvailability ANTES de oferecer horários.
-5. NUNCA invente dados. Use EXATAMENTE o que está em "ESTADO ATUAL".
-6. Só chame createAppointment quando TODOS os campos acima estiverem preenchidos.
-
-EXEMPLOS CORRETOS:
-- Cliente: "oi" → Você: "Olá! Como posso ajudar?"
-- Cliente: "estou com dor no siso" → Você: "Vou agendar uma consulta para você. Para qual data prefere?"
-- Cliente: "quero fazer canal" → (detecta procedimento) → Você: "Para qual data prefere?"
-PROMPT;
-```
-
-### 5. Log de Debug Melhorado
-
-```php
-error_log("===== MENSAGEM DO CLIENTE =====");
-error_log($message);
-error_log("===== DADOS EXTRAÍDOS =====");
-error_log(json_encode($extractedData));
-error_log("===== STEP CALCULADO =====");
-error_log($currentStep);
-```
+Sem isso, qualquer melhoria de prompt/extraction vai continuar parecendo “não mudou nada”.
 
 ---
 
-## Fluxo Corrigido
+## Mudanças planejadas (implementação)
 
-```text
-Cliente: "oi"
-→ extractDataFromMessage: nenhum dado
-→ currentStep: "greeting"
-→ IA: "Olá! Como posso ajudar?"
+### 1) Corrigir o `session_phone` do simulador (<= 20 chars)
+**Arquivo:** `backend/api/ai/simulate-chat.php`
 
-Cliente: "estou com dor no siso e queria marcar"
-→ extractDataFromMessage: detecta "dor" → procedure = "Consulta"
-→ currentStep: "date"
-→ IA: "Vou agendar uma consulta para você. Para qual data prefere?"
+- Trocar a geração atual:
+  ```php
+  $sessionPhone = 'SIMULATOR_' . $clinicaId . '_' . time();
+  ```
+  por um formato curto e estável, por exemplo:
+  - Prefixo fixo curto + clínica + timestamp em base36 + 1-2 chars rand.
+  - Exemplo final com no máximo 20:
+    - `S{cid}_{base36time}{r}`
+    - Ex: `S12_k9z3f1aQ`
 
-Cliente: "30/01 às 10h"
-→ extractDataFromMessage: date = "2026-01-30", time = "10:00"
-→ currentStep: "name" (procedure, date, time preenchidos)
-→ IA: "Perfeito! Para finalizar, qual seu nome completo?"
+**Ponto importante:** além de gerar curto, vamos criar uma normalização:
+- `normalizeSessionPhone($sessionPhone)` que garante:
+  - `trim()`
+  - remove espaços
+  - `substr(..., 0, 20)` como última defesa
+- E usar essa versão normalizada em **todas** as queries (select/insert/delete) e também no `Response::success` para o frontend.
 
-Cliente: "João Silva"
-→ extractDataFromMessage: patient_name = "João Silva"
-→ currentStep: "confirm"
-→ IA chama createAppointment
-→ IA: "Consulta agendada para 30/01/2026 às 10:00 para João Silva. Até lá!"
-```
+Assim, mesmo se por algum motivo o frontend mandar algo maior, o backend passa a “falar a mesma língua” do banco.
+
+### 2) Garantir consistência no DELETE (limpar sessão)
+**Arquivo:** `backend/api/ai/simulate-chat.php`
+
+- O endpoint DELETE também depende do `session_phone`.
+- Ele precisa usar a mesma função de normalização, senão “Limpar” pode não apagar a sessão certa.
+
+### 3) Verificação rápida: o estado realmente está persistindo
+**Arquivo:** `backend/api/ai/simulate-chat.php` e (opcional) `backend/api/services/OpenAIService.php`
+
+Adicionar logs estratégicos (temporários) para confirmar:
+- session_phone recebido
+- session_phone normalizado
+- se encontrou sessão no banco
+- tamanho do `phone` e do JSON de context
+- `collected_data` antes/depois
+
+Isso vai permitir validar em 1 minuto se o problema era 100% sessão.
+
+### 4) Ajuste pequeno (recomendado) no fluxo “consulta”
+**Arquivo:** `backend/api/services/OpenAIService.php`
+
+Depois que a sessão estiver persistindo, o comportamento esperado é:
+- “quero marcar uma consulta” já deveria setar procedure por alias `consulta`.
+- “estou com dor na mandíbula” também deve setar `Consulta` via sintomas.
+
+Mas para ficar ainda mais robusto, vamos reforçar uma regra:
+- Se a mensagem contém “consulta” (ou intenção clara de consulta) mesmo sem DB match, setar `procedure = 'Consulta'` (fallback), mantendo a regra do negócio: sintomas sempre viram consulta.
+
+Isso evita depender 100% de existir um procedimento “Consulta” cadastrado na lista.
 
 ---
 
-## Resumo das Mudanças
+## Sequência de validação (testes manuais)
 
-| Mudança | Motivo |
-|---------|--------|
-| Sintomas → Consulta | Cliente descreveu problema, não procedimento |
-| Aliases de procedimentos | "canal" → "Tratamento de Canal" |
-| Atualizar collected_data no retorno | Estado não estava persistindo |
-| Prompt anti-alucinação | Regras mais rígidas para evitar invenção |
-| Logs de debug | Facilitar troubleshooting |
+1) Clique em **Limpar** no simulador (para garantir sessão zerada).
+2) Envie:
+   - “boa tarde”
+   - “quero marcar uma consulta”
+   - “não sei, mas estou com dor na mandíbula”
+   - “30/01, 10h”
+   - “João da Silva”
+3) Resultado esperado após o fix:
+   - Ela não volta para “Qual procedimento deseja?” depois de já estar em consulta.
+   - Após “30/01, 10h”, ela deve pedir **nome completo** (pois já tem procedimento+data+hora).
+   - Não deve sugerir “canal”/“siso” se você não pediu procedimento específico.
 
 ---
 
-## Testes de Validação
+## Riscos/observações
 
-1. "oi" → saudação simples
-2. "estou com dor no siso" → pergunta data (não sugere canal)
-3. "quero fazer canal" → pergunta data (reconhece o procedimento)
-4. "30/01 às 10h" → pergunta nome (não repete pergunta de procedimento)
-5. "João Silva" → confirma agendamento
-6. Verificar logs para ver estado em cada passo
+- Esse bug é específico do simulador porque ele usa `session_phone` artificial; no WhatsApp real o telefone cabe em 20 caracteres.
+- Se futuramente você quiser IDs mais longos, aí sim vale uma migration para aumentar `phone` (ex: `VARCHAR(50)`), mas **o fix curto** resolve imediatamente sem depender de schema.
 
+---
+
+## Entregáveis (o que vai mudar)
+- `backend/api/ai/simulate-chat.php`
+  - session_phone curto
+  - normalização consistente em todas as queries
+  - logs para confirmar persistência
+- `backend/api/services/OpenAIService.php` (pequeno ajuste/fallback)
+  - reforço para “consulta” quando o usuário pede consulta ou relata sintomas, sem depender do nome exato do procedimento
+
+---
+
+## Critério de sucesso
+Em conversa multi-turn, a IA:
+- mantém `procedure=Consulta` após “dor …”
+- mantém `date/time` após “30/01, 10h”
+- não repete “Qual procedimento deseja?” quando `procedure` já está ✅
