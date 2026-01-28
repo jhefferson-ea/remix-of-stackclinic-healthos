@@ -1,6 +1,13 @@
 -- StackClinic Database Update v8 - Multi-Professional Support
 -- Execute no banco u226840309_stackclinic
 
+-- StackClinic Database Update v8 - Multi-Professional Support
+-- Execute no banco u226840309_stackclinic
+
+-- 1. Adicionar coluna last_login para rastrear primeiro acesso
+ALTER TABLE usuarios ADD COLUMN last_login TIMESTAMP NULL;
+
+-- 2. Tabela de procedimentos por profissional (N:N)
 CREATE TABLE IF NOT EXISTS profissional_procedimentos (
     id INT AUTO_INCREMENT PRIMARY KEY,
     usuario_id INT NOT NULL,
@@ -12,6 +19,7 @@ CREATE TABLE IF NOT EXISTS profissional_procedimentos (
     KEY idx_clinica (clinica_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- 3. Tabela de horários individuais por profissional
 CREATE TABLE IF NOT EXISTS horario_profissional (
     id INT AUTO_INCREMENT PRIMARY KEY,
     usuario_id INT NOT NULL,
