@@ -22,12 +22,15 @@ try {
     // Alguns ambientes antigos usam schema diferente (ex: role/status em vez de active,
     // sem colunas specialty/color, e às vezes sem clinica_id). Para evitar 500,
     // detectamos as colunas disponíveis e montamos a query dinamicamente.
-    $colsStmt = $db->prepare("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'usuarios'");
+    // IMPORTANTE: Em alguns hosts, INFORMATION_SCHEMA pode falhar por permissão.
+    // Usamos SHOW COLUMNS (mais compatível) para evitar erro 500.
+    $colsStmt = $db->prepare("SHOW COLUMNS FROM usuarios");
     $colsStmt->execute();
-    $cols = array_map(fn($r) => $r['COLUMN_NAME'], $colsStmt->fetchAll());
+    $cols = array_map(fn($r) => $r['Field'], $colsStmt->fetchAll());
     $has = fn($c) => in_array($c, $cols, true);
 
-    $selectCols = ['id', 'name', 'email', 'role'];
+    $selectCols = ['id', 'name', 'email'];
+    if ($has('role')) $selectCols[] = 'role';
     if ($has('specialty')) $selectCols[] = 'specialty';
     if ($has('color')) $selectCols[] = 'color';
     if ($has('clinica_id')) $selectCols[] = 'clinica_id';
@@ -35,15 +38,18 @@ try {
     $where = [];
     $params = [];
 
-    // Multi-tenant quando disponível
-    if ($has('clinica_id')) {
-        $where[] = 'clinica_id = :clinica_id';
-        $params[':clinica_id'] = $clinicaId;
+    // Multi-tenant: este endpoint deve SEMPRE retornar apenas médicos da clínica logada.
+    // Se não existir clinica_id na tabela, é inseguro listar usuários sem filtro.
+    if (!$has('clinica_id')) {
+        error_log("List professionals: tabela usuarios sem coluna clinica_id (bloqueado por segurança)");
+        Response::success([]);
     }
+    $where[] = 'clinica_id = :clinica_id';
+    $params[':clinica_id'] = $clinicaId;
 
-    // Roles compatíveis (owner/admin/doctor)
+    // Somente médicos (excluir owner/admin/secretaria)
     if ($has('role')) {
-        $where[] = "role IN ('admin','owner','doctor')";
+        $where[] = "role = 'doctor'";
     }
 
     // Status/active compatível
