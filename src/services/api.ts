@@ -1,7 +1,20 @@
 // StackClinic API Service Layer
 // Conexão com backend PHP + MariaDB na Hostinger
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'https://stackclinic.stacklabz.io/api';
+function normalizeApiBaseUrl(raw: string) {
+  // 1) remove trailing slash
+  let base = raw.trim().replace(/\/+$/, '');
+
+  // 2) garante que termina com /api
+  if (!/\/api$/i.test(base)) {
+    base = `${base}/api`;
+  }
+  return base;
+}
+
+const API_BASE_URL = normalizeApiBaseUrl(
+  import.meta.env.VITE_API_URL || 'https://stackclinic.stacklabz.io/api'
+);
 
 interface ApiResponse<T> {
   success: boolean;
