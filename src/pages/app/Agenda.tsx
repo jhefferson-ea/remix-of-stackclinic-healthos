@@ -57,7 +57,9 @@ export default function Agenda() {
     setIsLoading(true);
     
     const [appointmentsRes, suggestionsRes, waitingRes] = await Promise.all([
-      api.getAppointments(undefined, selectedProfessionalId || undefined),
+      // IMPORTANT: não depender do backend para filtrar por profissional.
+      // A filtragem é feita no frontend para manter compatibilidade com backends antigos.
+      api.getAppointments(undefined),
       api.getAiSuggestions(),
       api.getWaitingList(),
     ]);
@@ -65,11 +67,24 @@ export default function Agenda() {
     if (appointmentsRes.success && appointmentsRes.data) {
       const data = appointmentsRes.data as { appointments?: Appointment[]; blocks?: Block[] } | Appointment[];
       if ('appointments' in data && 'blocks' in data) {
-        setAppointments(data.appointments || []);
-        setBlocks(data.blocks || []);
+        const allAppointments = data.appointments || [];
+        const allBlocks = data.blocks || [];
+
+        setAppointments(allAppointments);
+        // Se houver profissional selecionado, filtra bloqueios locais (usuario_id)
+        setBlocks(
+          selectedProfessionalId
+            ? allBlocks.filter((b) => !b.usuario_id || b.usuario_id === selectedProfessionalId)
+            : allBlocks
+        );
       } else if (Array.isArray(data)) {
         setAppointments(data);
       }
+    } else {
+      console.warn('[Agenda] Falha ao carregar agendamentos', {
+        error: appointmentsRes.error,
+        data: appointmentsRes.data,
+      });
     }
     if (suggestionsRes.success && suggestionsRes.data) {
       setSuggestions(suggestionsRes.data);
@@ -139,10 +154,12 @@ export default function Agenda() {
     return statusColors[apt.status] || statusColors.pending;
   };
 
-  // Filter appointments by status if filter is active
-  const filteredAppointments = statusFilter 
-    ? appointments.filter(apt => apt.status === statusFilter)
-    : appointments;
+  // Filtra localmente por status e profissional (não depender do backend)
+  const filteredAppointments = appointments.filter((apt) => {
+    if (statusFilter && apt.status !== statusFilter) return false;
+    if (selectedProfessionalId && apt.professional_id !== selectedProfessionalId) return false;
+    return true;
+  });
 
   const getAppointmentsForSlot = (day: Date, hour: number) => {
     const dateStr = format(day, 'yyyy-MM-dd');
