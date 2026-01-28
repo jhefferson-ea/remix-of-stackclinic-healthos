@@ -43,6 +43,11 @@ export function ProfessionalFilter({ value, onChange, className }: ProfessionalF
     const res = await api.getProfessionals();
     if (res.success && res.data) {
       setProfessionals(res.data);
+    } else {
+      console.warn('[ProfessionalFilter] Falha ao carregar profissionais', {
+        error: res.error,
+        data: res.data,
+      });
     }
     setIsLoading(false);
   }

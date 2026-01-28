@@ -313,9 +313,22 @@ export function TeamManagement() {
                 <td className="p-4">
                   <Badge 
                     variant="outline" 
-                    className={cn('font-normal', statusColors[member.status || (member.active ? 'active' : 'inactive')])}
+                    className={cn(
+                      'font-normal',
+                      statusColors[
+                        // Se o backend devolver "pending" mas o usuário está ativo, mostramos "active".
+                        // (Isso evita ficar preso em "pendente" quando o backend ainda não atualiza last_login.)
+                        (member.status === 'pending' && member.active)
+                          ? 'active'
+                          : (member.status || (member.active ? 'active' : 'inactive'))
+                      ]
+                    )}
                   >
-                    {statusLabels[member.status || (member.active ? 'active' : 'inactive')]}
+                    {statusLabels[
+                      (member.status === 'pending' && member.active)
+                        ? 'active'
+                        : (member.status || (member.active ? 'active' : 'inactive'))
+                    ]}
                   </Badge>
                 </td>
                 <td className="p-4 text-right">
