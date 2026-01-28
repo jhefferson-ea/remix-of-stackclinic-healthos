@@ -1,81 +1,130 @@
 
-# Plano: Correção do Script SQL Database Update v8
+# Plano: Correção de 3 Problemas - Profissionais, Status e Confirmação
 
-## Problema Identificado
+## Problemas Identificados
 
-O script SQL atual tem erro de sintaxe na definição das tabelas `profissional_procedimentos` e `horario_profissional`. O erro ocorre porque:
+### 1. Dropdown de Profissionais Vazio no Calendário
+**Causa**: O endpoint `GET /api/team/professionals` filtra por `active = 1`, mas usuários convidados podem estar com `active = 0` ou a query não está retornando os profissionais corretamente.
 
-1. A sintaxe `IF NOT EXISTS` em índices não é suportada pelo MariaDB 11.8
-2. A ordem dos elementos dentro do CREATE TABLE está incorreta
-
-## Estado Atual do Banco (Analisado)
-
-| Elemento | Status |
-|----------|--------|
-| `agendamentos.usuario_id` | Já existe |
-| `bloqueios_agenda.usuario_id` | Já existe |
-| `pagamentos_procedimentos.usuario_id` | Já existe |
-| `usuarios.color` | Já existe |
-| Tabela `profissional_procedimentos` | NÃO existe - precisa criar |
-| Tabela `horario_profissional` | NÃO existe - precisa criar |
-
-## Solução
-
-Criar um script SQL simplificado que apenas cria as duas tabelas faltantes, sem tentar modificar colunas que já existem.
-
-## Arquivo a Modificar
-
-- `backend/database-update-v8-professionals.sql`
-
-## Script SQL Corrigido
-
-```sql
--- StackClinic Database Update v8 - Multi-Professional Support
--- VERSÃO SIMPLIFICADA - Apenas tabelas novas
--- Execute no banco u226840309_stackclinic
-
--- =====================================================
--- TABELA 1: profissional_procedimentos (N:N)
--- Vincula quais profissionais executam quais procedimentos
--- =====================================================
-CREATE TABLE IF NOT EXISTS profissional_procedimentos (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    usuario_id INT NOT NULL,
-    procedimento_id INT NOT NULL,
-    clinica_id INT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE KEY idx_user_proc (usuario_id, procedimento_id),
-    KEY idx_proc (procedimento_id),
-    KEY idx_clinica (clinica_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- =====================================================
--- TABELA 2: horario_profissional
--- Horário de atendimento individual de cada profissional
--- =====================================================
-CREATE TABLE IF NOT EXISTS horario_profissional (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    usuario_id INT NOT NULL,
-    clinica_id INT NOT NULL,
-    day INT NOT NULL COMMENT '0=Domingo, 1=Segunda, 2=Terça, 3=Quarta, 4=Quinta, 5=Sexta, 6=Sábado',
-    open_time TIME NOT NULL,
-    close_time TIME NOT NULL,
-    active TINYINT(1) DEFAULT 1,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    UNIQUE KEY idx_user_day (usuario_id, day),
-    KEY idx_clinica (clinica_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+**Análise do código atual:**
+```php
+WHERE clinica_id = :clinica_id 
+  AND role IN ('admin', 'doctor') 
+  AND active = 1
 ```
 
-## Mudanças Técnicas
+O problema pode ser:
+- Usuários não foram criados com `active = 1`
+- O filtro `role IN ('admin', 'doctor')` não inclui o role correto
 
-1. **Removido `IF NOT EXISTS` dos ALTERs** - As colunas já existem no banco
-2. **Trocado `INDEX` por `KEY`** - Sintaxe mais compatível com MariaDB
-3. **Removido `IF NOT EXISTS` dos CREATE INDEX** - Não suportado pelo MariaDB
-4. **Renomeado colunas de horário** - De `open`/`close` para `open_time`/`close_time` (evita conflito com palavras reservadas)
-5. **Usado `TINYINT(1)` em vez de `BOOLEAN`** - Mais compatível
+### 2. Status do Membro Fica "Pendente" Após Login
+**Causa**: O `backend/api/team/index.php` usa uma lógica baseada em tempo de criação para determinar se é "pending":
 
-## Backend Ajuste Necessário
+```php
+$daysSinceCreation = (time() - $createdAt) / 86400;
+$isPending = $daysSinceCreation < 7 && $user['role'] !== 'admin';
+```
 
-Após aplicar o SQL, será necessário um pequeno ajuste no `OpenAIService.php` para usar os nomes corretos das colunas (`open_time` e `close_time`).
+Esta lógica está incorreta - deveria verificar se o usuário já fez login, não apenas o tempo desde a criação.
+
+**Solução**:
+1. Adicionar coluna `last_login` na tabela `usuarios`
+2. Atualizar `last_login` quando o usuário fizer login
+3. Usar `last_login IS NULL` para determinar status "pending"
+
+### 3. Smart Feed Mostra "Agendamentos Pendentes" Sem Funcionalidade
+**Causa**: O `backend/api/dashboard/smart-feed.php` adiciona dinamicamente um alerta sobre agendamentos pendentes, mas não existe UI para confirmar agendamentos.
+
+**Solução**: Implementar a funcionalidade de confirmação de agendamentos:
+1. Adicionar endpoint para confirmar/cancelar agendamentos do smart feed
+2. Atualizar a UI do Smart Feed para executar ações
+3. Redirecionar para a Agenda com filtro de agendamentos pendentes
+
+---
+
+## Arquivos a Modificar
+
+| Arquivo | Alteração |
+|---------|-----------|
+| `backend/database-update-v8-professionals.sql` | Adicionar coluna `last_login` |
+| `backend/api/auth/login.php` | Atualizar `last_login` no login |
+| `backend/api/team/index.php` | Corrigir lógica de status "pending" |
+| `backend/api/team/professionals.php` | Ajustar query para incluir proprietários |
+| `src/components/dashboard/SmartFeed.tsx` | Adicionar ações funcionais |
+| `src/pages/app/Agenda.tsx` | Adicionar filtro de status |
+
+---
+
+## Detalhes Técnicos
+
+### Alteração 1: Adicionar `last_login` no SQL
+
+```sql
+-- Adicionar ao database-update-v8-professionals.sql
+ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS last_login TIMESTAMP NULL;
+```
+
+### Alteração 2: Atualizar `last_login` no Login
+
+```php
+// Em login.php, após verificar senha:
+$db->prepare("UPDATE usuarios SET last_login = NOW() WHERE id = :id")
+   ->execute([':id' => $user['id']]);
+```
+
+### Alteração 3: Corrigir Lógica de Status
+
+```php
+// Em team/index.php:
+// Antes (incorreto):
+$daysSinceCreation = (time() - $createdAt) / 86400;
+$isPending = $daysSinceCreation < 7 && $user['role'] !== 'admin';
+
+// Depois (correto):
+$hasLoggedIn = !empty($user['last_login']);
+$status = $hasLoggedIn ? ((bool)$user['active'] ? 'active' : 'inactive') : 'pending';
+```
+
+### Alteração 4: Ajustar Query de Profissionais
+
+O problema está na query que não considera que o owner também é um profissional. Ajustar:
+
+```php
+// Antes: role IN ('admin', 'doctor')
+// Depois: (role IN ('admin', 'doctor')) - já está correto
+// Verificar se active está sendo setado corretamente na criação
+```
+
+### Alteração 5: Smart Feed com Ações
+
+Adicionar navegação para Agenda com filtro:
+
+```typescript
+// Em SmartFeed.tsx - ao clicar na ação "confirm_appointments":
+if (item.action === 'confirm_appointments') {
+  navigate('/app/agenda?status=pending&date=tomorrow');
+}
+```
+
+### Alteração 6: Filtro de Status na Agenda
+
+Adicionar parâmetro de URL para filtrar por status pendente e permitir confirmação rápida.
+
+---
+
+## Ordem de Implementação
+
+1. Atualizar script SQL com `last_login`
+2. Modificar `login.php` para registrar último acesso
+3. Corrigir lógica de status em `team/index.php`
+4. Ajustar `professionals.php` se necessário
+5. Atualizar SmartFeed com navegação
+6. Adicionar filtro de status na Agenda (opcional, para melhor UX)
+
+---
+
+## Resultado Esperado
+
+- Dropdown de profissionais mostrará todos os médicos ativos da clínica
+- Membros convidados terão status "Ativo" após primeiro login
+- Smart Feed redirecionará para Agenda ao clicar em "Confirmar agendamentos"
