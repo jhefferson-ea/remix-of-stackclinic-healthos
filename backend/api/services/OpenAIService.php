@@ -64,7 +64,7 @@ class OpenAIService {
             WHERE pp.procedimento_id = :proc_id 
             AND pp.clinica_id = :clinica_id
             AND u.active = 1 
-            AND u.role IN ('doctor','admin')
+            AND u.role = 'doctor'
             ORDER BY u.name
         ");
         $stmt->execute([':proc_id' => $procedureId, ':clinica_id' => $clinicaId]);
@@ -85,11 +85,21 @@ class OpenAIService {
         $stmt = $this->db->prepare("
             SELECT id, name, specialty, color 
             FROM usuarios 
-            WHERE clinica_id = :clinica_id AND active = 1 AND role IN ('doctor','admin')
+            WHERE clinica_id = :clinica_id AND active = 1 AND role = 'doctor'
             ORDER BY name
         ");
         $stmt->execute([':clinica_id' => $clinicaId]);
         return $stmt->fetchAll();
+    }
+
+    /**
+     * Garante que um usuario_id recebido (ex.: via tool calling) é um MÉDICO válido da clínica.
+     */
+    private function isValidDoctorId($usuarioId, $clinicaId) {
+        if (!$usuarioId) return false;
+        $stmt = $this->db->prepare("SELECT id FROM usuarios WHERE id = :id AND clinica_id = :clinica_id AND active = 1 AND role = 'doctor' LIMIT 1");
+        $stmt->execute([':id' => (int)$usuarioId, ':clinica_id' => (int)$clinicaId]);
+        return (bool)($stmt->fetch());
     }
     
     /**
@@ -143,7 +153,7 @@ class OpenAIService {
             FROM usuarios 
             WHERE clinica_id = :clinica_id 
             AND active = 1 
-            AND role IN ('doctor','admin')
+            AND role = 'doctor'
             AND LOWER(name) LIKE :name
             LIMIT 1
         ");
@@ -327,6 +337,34 @@ class OpenAIService {
                             $extracted['professional_name'] = $prof['name'];
                             error_log("Profissional detectado: {$prof['name']}");
                             break 2;
+                        }
+                    }
+                }
+
+                // Se mencionou um médico explicitamente e NÃO encontramos na lista, marcamos como inválido
+                // para que a IA responda corretamente (sem inventar nomes).
+                if (empty($extracted['professional_id'])) {
+                    $requestedName = null;
+
+                    // Ex.: "Dr. João Silva", "Doutora Maria"
+                    if (preg_match('/\b(dr\.?|dra\.?|doutor(a)?)\s+([A-Za-zÀ-ÿ]+(?:\s+[A-Za-zÀ-ÿ]+){0,3})/iu', $messageOriginal, $m)) {
+                        $requestedName = trim($m[3]);
+                    }
+
+                    // Ex.: "com o João", "com a Maria"
+                    if (!$requestedName && preg_match('/\bcom\s+(?:o|a)\s+([A-Za-zÀ-ÿ]+(?:\s+[A-Za-zÀ-ÿ]+){0,3})/iu', $messageOriginal, $m2)) {
+                        $requestedName = trim($m2[1]);
+                    }
+
+                    if ($requestedName) {
+                        $found = $this->findProfessionalByName($requestedName, $this->clinica['id']);
+                        if ($found) {
+                            $extracted['professional_id'] = $found['id'];
+                            $extracted['professional_name'] = $found['name'];
+                            error_log("Profissional detectado por regex: {$found['name']}");
+                        } else {
+                            $extracted['professional_invalid_name'] = $requestedName;
+                            error_log("Profissional solicitado não existe na clínica: {$requestedName}");
                         }
                     }
                 }
@@ -613,11 +651,23 @@ class OpenAIService {
                 // Lista opções disponíveis
                 $professionals = $this->findProfessionalsForProcedure($collectedData['procedure_id'] ?? null, $this->clinica['id']);
                 $names = array_values(array_filter(array_map(fn($p) => $p['name'] ?? null, $professionals)));
-                if (empty($names)) {
-                    // Se não conseguimos carregar a lista, NÃO deixe a IA inventar.
-                    $profStatus = "❌ PERGUNTAR (opções indisponíveis no momento)";
+                $hasNames = !empty($names);
+
+                // Se o paciente pediu um médico que não existe, precisamos negar explicitamente.
+                if (!empty($collectedData['professional_invalid_name'])) {
+                    $requested = $this->sanitizeString($collectedData['professional_invalid_name']);
+                    if ($hasNames) {
+                        $profStatus = "❌ SOLICITADO_NAO_EXISTE (solicitado: {$requested} | opções: " . implode(', ', $names) . ")";
+                    } else {
+                        $profStatus = "❌ SOLICITADO_NAO_EXISTE (solicitado: {$requested} | opções indisponíveis no momento)";
+                    }
                 } else {
-                    $profStatus = "❌ PERGUNTAR (opções: " . implode(', ', $names) . ")";
+                    if (!$hasNames) {
+                        // Se não conseguimos carregar a lista, NÃO deixe a IA inventar.
+                        $profStatus = "❌ PERGUNTAR (opções indisponíveis no momento)";
+                    } else {
+                        $profStatus = "❌ PERGUNTAR (opções: " . implode(', ', $names) . ")";
+                    }
                 }
             }
         }
@@ -662,6 +712,7 @@ REGRAS ABSOLUTAS (SIGA OU A CONVERSA FALHARÁ):
 3. Se Profissional = "PERGUNTAR":
    - Se a linha "Profissional:" contém "opções:", pergunte a preferência citando SOMENTE essas opções.
    - Se a linha "Profissional:" contém "opções indisponíveis", NÃO cite nomes e peça para o cliente dizer o nome desejado (ou responda que não é possível listar os profissionais agora).
+   - Se a linha "Profissional:" contém "SOLICITADO_NAO_EXISTE", diga que esse médico não atende nessa clínica e peça para escolher UMA das opções listadas (se houver opções listadas).
 4. Se cliente disser "qualquer um/tanto faz", aceite e siga para a data.
 5. Se Procedimento = ✅, NÃO pergunte de novo. Vá para o próximo campo ❌.
 6. MÁXIMO 2 frases curtas. UMA pergunta por vez.
@@ -897,6 +948,12 @@ PROMPT;
             case 'checkAvailability':
                 $date = $this->sanitizeDate($arguments['date'] ?? '');
                 $professionalId = isset($arguments['professional_id']) ? (int)$arguments['professional_id'] : null;
+
+                // Nunca aceitar IDs fora da lista de médicos da clínica
+                if ($professionalId && !$this->isValidDoctorId($professionalId, $clinicaId)) {
+                    error_log("checkAvailability: professional_id inválido para a clínica ({$professionalId}) — ignorando");
+                    $professionalId = null;
+                }
                 
                 // Se não tem profissional específico mas tem preferência "auto", usa balanceamento
                 if (!$professionalId && ($collectedData['professional_preference'] ?? '') === 'auto' && !empty($collectedData['procedure_id'])) {
@@ -915,6 +972,12 @@ PROMPT;
                 
             case 'createAppointment':
                 $professionalId = isset($arguments['professional_id']) ? (int)$arguments['professional_id'] : null;
+
+                // Nunca aceitar IDs fora da lista de médicos da clínica
+                if ($professionalId && !$this->isValidDoctorId($professionalId, $clinicaId)) {
+                    error_log("createAppointment: professional_id inválido para a clínica ({$professionalId}) — ignorando");
+                    $professionalId = null;
+                }
                 
                 // Se não tem profissional específico mas tem preferência "auto", usa balanceamento
                 if (!$professionalId && ($collectedData['professional_preference'] ?? '') === 'auto' && !empty($collectedData['procedure_id'])) {
