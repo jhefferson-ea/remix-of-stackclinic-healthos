@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { format, addDays, addMonths, startOfWeek, startOfMonth, endOfMonth, isSameDay, isSameMonth, getDay, eachDayOfInterval } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
-import { ChevronLeft, ChevronRight, Phone, Clock, CheckCircle, XCircle, AlertTriangle, Bell, Users, Plus, Ban, Loader2, CalendarDays } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Phone, Clock, CheckCircle, XCircle, AlertTriangle, Bell, Users, Plus, Ban, Loader2, CalendarDays, Filter } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { api, type Appointment, type AiSuggestion, type WaitingListPatient, type Block } from '@/services/api';
@@ -9,6 +10,7 @@ import { NewAppointmentModal } from '@/components/agenda/NewAppointmentModal';
 import { BlockTimeModal } from '@/components/agenda/BlockTimeModal';
 import { AppointmentDetailModal } from '@/components/agenda/AppointmentDetailModal';
 import { ProfessionalFilter, colorMap } from '@/components/agenda/ProfessionalFilter';
+import { Badge } from '@/components/ui/badge';
 
 // Professional color classes for appointments
 const professionalColorClasses: Record<string, string> = {
@@ -23,8 +25,18 @@ const professionalColorClasses: Record<string, string> = {
 };
 
 export default function Agenda() {
-  const [currentDate, setCurrentDate] = useState(new Date());
-  const [view, setView] = useState<'day' | 'week' | 'month'>('week');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [currentDate, setCurrentDate] = useState(() => {
+    const dateParam = searchParams.get('date');
+    if (dateParam === 'tomorrow') {
+      return addDays(new Date(), 1);
+    }
+    return new Date();
+  });
+  const [view, setView] = useState<'day' | 'week' | 'month'>(() => {
+    // If filtering by status, default to day view for easier confirmation
+    return searchParams.get('status') ? 'day' : 'week';
+  });
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [blocks, setBlocks] = useState<Block[]>([]);
   const [suggestions, setSuggestions] = useState<AiSuggestion[]>([]);
@@ -35,6 +47,7 @@ export default function Agenda() {
   const [selectedAppointment, setSelectedAppointment] = useState<Appointment | null>(null);
   const [isDetailOpen, setIsDetailOpen] = useState(false);
   const [selectedProfessionalId, setSelectedProfessionalId] = useState<number | null>(null);
+  const [statusFilter, setStatusFilter] = useState<string | null>(() => searchParams.get('status'));
 
   useEffect(() => {
     loadData();
@@ -126,9 +139,14 @@ export default function Agenda() {
     return statusColors[apt.status] || statusColors.pending;
   };
 
+  // Filter appointments by status if filter is active
+  const filteredAppointments = statusFilter 
+    ? appointments.filter(apt => apt.status === statusFilter)
+    : appointments;
+
   const getAppointmentsForSlot = (day: Date, hour: number) => {
     const dateStr = format(day, 'yyyy-MM-dd');
-    return appointments.filter(apt => {
+    return filteredAppointments.filter(apt => {
       const aptHour = parseInt(apt.time.split(':')[0]);
       return apt.date === dateStr && aptHour === hour;
     });
@@ -136,7 +154,7 @@ export default function Agenda() {
 
   const getAppointmentsForDay = (day: Date) => {
     const dateStr = format(day, 'yyyy-MM-dd');
-    return appointments.filter(apt => apt.date === dateStr);
+    return filteredAppointments.filter(apt => apt.date === dateStr);
   };
 
   const getBlocksForSlot = (day: Date, hour: number) => {
@@ -185,6 +203,22 @@ export default function Agenda() {
           <p className="text-muted-foreground">Gerencie seus agendamentos com IA</p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
+          {/* Status Filter Badge */}
+          {statusFilter && (
+            <Badge 
+              variant="secondary" 
+              className="flex items-center gap-1 cursor-pointer hover:bg-destructive/20"
+              onClick={() => {
+                setStatusFilter(null);
+                setSearchParams({});
+              }}
+            >
+              <Filter className="h-3 w-3" />
+              Pendentes
+              <XCircle className="h-3 w-3 ml-1" />
+            </Badge>
+          )}
+          
           {/* Professional Filter */}
           <ProfessionalFilter 
             value={selectedProfessionalId} 

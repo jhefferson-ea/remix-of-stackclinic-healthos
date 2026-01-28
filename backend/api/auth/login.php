@@ -53,6 +53,10 @@ try {
         Response::unauthorized('Credenciais inválidas');
     }
 
+    // Atualizar last_login para rastrear primeiro acesso
+    $stmtLogin = $db->prepare("UPDATE usuarios SET last_login = NOW() WHERE id = :id");
+    $stmtLogin->execute([':id' => $user['id']]);
+
     // Generate JWT token with clinica_id for multi-tenancy
     $token = Auth::generateToken($user['id'], $user['email'], $user['role'], $user['clinica_id']);
 

@@ -1,4 +1,5 @@
 import { AlertTriangle, Cake, Clock, TrendingUp, CheckCircle, ChevronRight } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import { cn } from '@/lib/utils';
 import type { SmartFeedItem } from '@/services/api';
 
@@ -44,6 +45,26 @@ const styleMap = {
 };
 
 export function SmartFeed({ items, isLoading }: SmartFeedProps) {
+  const navigate = useNavigate();
+
+  const handleAction = (action: string | undefined) => {
+    if (!action) return;
+    
+    switch (action) {
+      case 'confirm_appointments':
+        navigate('/app/agenda?status=pending&date=tomorrow');
+        break;
+      case 'view_inadimplentes':
+        navigate('/app/financeiro?filter=inadimplentes');
+        break;
+      case 'send_birthday_msg':
+        // Future: open birthday message modal
+        break;
+      default:
+        break;
+    }
+  };
+
   if (isLoading) {
     return (
       <div className="space-y-3">
@@ -99,8 +120,14 @@ export function SmartFeed({ items, isLoading }: SmartFeedProps) {
                 )}
               </div>
               {item.action && (
-                <button className="mt-2 inline-flex items-center text-sm font-medium text-primary hover:text-primary/80 transition-colors">
-                  {item.action}
+                <button 
+                  onClick={() => handleAction(item.action)}
+                  className="mt-2 inline-flex items-center text-sm font-medium text-primary hover:text-primary/80 transition-colors"
+                >
+                  {item.action === 'confirm_appointments' ? 'Confirmar agendamentos' : 
+                   item.action === 'view_inadimplentes' ? 'Ver inadimplentes' :
+                   item.action === 'send_birthday_msg' ? 'Enviar mensagem' :
+                   item.action}
                   <ChevronRight className="ml-1 h-4 w-4 transition-transform group-hover:translate-x-0.5" />
                 </button>
               )}

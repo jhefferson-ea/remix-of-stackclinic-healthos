@@ -34,7 +34,7 @@ $method = $_SERVER['REQUEST_METHOD'];
 try {
     if ($method === 'GET') {
         $stmt = $db->prepare("
-            SELECT id, name, email, role, avatar, phone, active, created_at 
+            SELECT id, name, email, role, avatar, phone, active, created_at, last_login 
             FROM usuarios 
             WHERE clinica_id = :clinica_id
             ORDER BY created_at DESC
@@ -49,10 +49,16 @@ try {
                 'assistant' => 'secretary'
             ];
             
-            // Determine status: pending if never logged in (no last_login or recent creation)
-            $createdAt = strtotime($user['created_at']);
-            $daysSinceCreation = (time() - $createdAt) / 86400;
-            $isPending = $daysSinceCreation < 7 && $user['role'] !== 'admin';
+            // Determine status: pending if never logged in (last_login is NULL)
+            $hasLoggedIn = !empty($user['last_login']);
+            $isActive = (bool)$user['active'];
+            
+            // Admin (owner) is always active, others depend on last_login
+            if ($user['role'] === 'admin') {
+                $status = $isActive ? 'active' : 'inactive';
+            } else {
+                $status = $hasLoggedIn ? ($isActive ? 'active' : 'inactive') : 'pending';
+            }
             
             return [
                 'id' => (int)$user['id'],
@@ -61,8 +67,8 @@ try {
                 'role' => $roleMap[$user['role']] ?? $user['role'],
                 'avatar' => $user['avatar'],
                 'phone' => $user['phone'],
-                'active' => (bool)$user['active'],
-                'status' => $isPending ? 'pending' : ((bool)$user['active'] ? 'active' : 'inactive'),
+                'active' => $isActive,
+                'status' => $status,
                 'created_at' => $user['created_at']
             ];
         }, $users);
