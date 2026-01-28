@@ -612,8 +612,13 @@ class OpenAIService {
             } else {
                 // Lista opções disponíveis
                 $professionals = $this->findProfessionalsForProcedure($collectedData['procedure_id'] ?? null, $this->clinica['id']);
-                $names = array_map(fn($p) => $p['name'], $professionals);
-                $profStatus = "❌ PERGUNTAR (opções: " . implode(', ', $names) . ")";
+                $names = array_values(array_filter(array_map(fn($p) => $p['name'] ?? null, $professionals)));
+                if (empty($names)) {
+                    // Se não conseguimos carregar a lista, NÃO deixe a IA inventar.
+                    $profStatus = "❌ PERGUNTAR (opções indisponíveis no momento)";
+                } else {
+                    $profStatus = "❌ PERGUNTAR (opções: " . implode(', ', $names) . ")";
+                }
             }
         }
         
@@ -654,7 +659,9 @@ REGRAS ABSOLUTAS (SIGA OU A CONVERSA FALHARÁ):
 
 1. NUNCA SUGIRA procedimentos. O sistema já detectou automaticamente acima.
 2. Se Procedimento = "NÃO INFORMADO", pergunte: "Qual procedimento deseja?"
-3. Se Profissional = "PERGUNTAR", pergunte: "Você tem preferência por algum profissional? [listar nomes]"
+3. Se Profissional = "PERGUNTAR":
+   - Se a linha "Profissional:" contém "opções:", pergunte a preferência citando SOMENTE essas opções.
+   - Se a linha "Profissional:" contém "opções indisponíveis", NÃO cite nomes e peça para o cliente dizer o nome desejado (ou responda que não é possível listar os profissionais agora).
 4. Se cliente disser "qualquer um/tanto faz", aceite e siga para a data.
 5. Se Procedimento = ✅, NÃO pergunte de novo. Vá para o próximo campo ❌.
 6. MÁXIMO 2 frases curtas. UMA pergunta por vez.
