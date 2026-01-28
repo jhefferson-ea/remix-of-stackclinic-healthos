@@ -4,11 +4,32 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Loader2, Calendar, Clock } from 'lucide-react';
+import { Loader2, Calendar, Clock, User } from 'lucide-react';
 import { api, type Patient, type Procedure } from '@/services/api';
 import { useToast } from '@/hooks/use-toast';
 import { format, getDay, parse } from 'date-fns';
 import { BlockConflictDialog } from './BlockConflictDialog';
+import { cn } from '@/lib/utils';
+
+interface Professional {
+  id: number;
+  name: string;
+  email: string;
+  specialty?: string;
+  color?: string;
+  role: string;
+}
+
+const colorMap: Record<string, string> = {
+  blue: 'bg-blue-500',
+  green: 'bg-green-500',
+  purple: 'bg-purple-500',
+  orange: 'bg-orange-500',
+  pink: 'bg-pink-500',
+  cyan: 'bg-cyan-500',
+  amber: 'bg-amber-500',
+  rose: 'bg-rose-500',
+};
 
 interface Block {
   id: number;
@@ -32,15 +53,18 @@ interface NewAppointmentModalProps {
 export function NewAppointmentModal({ open, onOpenChange, onSuccess, initialDate, blocks = [] }: NewAppointmentModalProps) {
   const [patients, setPatients] = useState<Patient[]>([]);
   const [procedures, setProcedures] = useState<Procedure[]>([]);
+  const [professionals, setProfessionals] = useState<Professional[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedPatient, setSelectedPatient] = useState<string>('');
   const [selectedProcedure, setSelectedProcedure] = useState<string>('');
+  const [selectedProfessional, setSelectedProfessional] = useState<string>('');
   const [date, setDate] = useState(format(initialDate || new Date(), 'yyyy-MM-dd'));
   const [time, setTime] = useState('09:00');
   const [duration, setDuration] = useState('30');
   const [isLoading, setIsLoading] = useState(false);
   const [isLoadingPatients, setIsLoadingPatients] = useState(false);
   const [isLoadingProcedures, setIsLoadingProcedures] = useState(false);
+  const [isLoadingProfessionals, setIsLoadingProfessionals] = useState(false);
   const [showConflictDialog, setShowConflictDialog] = useState(false);
   const [conflictingBlocks, setConflictingBlocks] = useState<Block[]>([]);
   const { toast } = useToast();
@@ -49,6 +73,7 @@ export function NewAppointmentModal({ open, onOpenChange, onSuccess, initialDate
     if (open) {
       loadPatients();
       loadProcedures();
+      loadProfessionals();
     }
   }, [open]);
 
@@ -74,6 +99,15 @@ export function NewAppointmentModal({ open, onOpenChange, onSuccess, initialDate
       setProcedures(res.data);
     }
     setIsLoadingProcedures(false);
+  };
+
+  const loadProfessionals = async () => {
+    setIsLoadingProfessionals(true);
+    const res = await api.getProfessionals();
+    if (res.success && res.data) {
+      setProfessionals(res.data);
+    }
+    setIsLoadingProfessionals(false);
   };
 
   const handleProcedureChange = (procedureId: string) => {
@@ -144,6 +178,9 @@ export function NewAppointmentModal({ open, onOpenChange, onSuccess, initialDate
     setIsLoading(true);
 
     const selectedProc = procedures.find(p => p.id.toString() === selectedProcedure);
+    const professionalId = selectedProfessional && selectedProfessional !== 'none' 
+      ? parseInt(selectedProfessional) 
+      : undefined;
 
     const res = await api.createAppointment({
       patient_id: parseInt(selectedPatient),
@@ -152,6 +189,7 @@ export function NewAppointmentModal({ open, onOpenChange, onSuccess, initialDate
       duration: parseInt(duration),
       procedure: selectedProc?.name || '',
       procedimento_id: selectedProcedure ? parseInt(selectedProcedure) : undefined,
+      usuario_id: professionalId,
     });
 
     if (res.success && res.data && typeof res.data === 'object' && 'id' in res.data) {
@@ -215,6 +253,7 @@ export function NewAppointmentModal({ open, onOpenChange, onSuccess, initialDate
   const handleClose = () => {
     setSelectedPatient('');
     setSelectedProcedure('');
+    setSelectedProfessional('');
     setDuration('30');
     setConflictingBlocks([]);
     onOpenChange(false);
@@ -320,6 +359,46 @@ export function NewAppointmentModal({ open, onOpenChange, onSuccess, initialDate
                           {proc.name} - {new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(proc.price)}
                         </SelectItem>
                       ))
+                    )}
+                  </SelectContent>
+                </Select>
+              </div>
+              
+              <div className="space-y-2">
+                <Label>Profissional</Label>
+                <Select value={selectedProfessional} onValueChange={setSelectedProfessional}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Selecione um profissional (opcional)" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {isLoadingProfessionals ? (
+                      <div className="flex items-center justify-center p-2">
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      </div>
+                    ) : professionals.length === 0 ? (
+                      <div className="p-2 text-sm text-muted-foreground text-center">
+                        Nenhum profissional cadastrado
+                      </div>
+                    ) : (
+                      <>
+                        <SelectItem value="none">
+                          <div className="flex items-center gap-2">
+                            <User className="h-4 w-4" />
+                            <span>Sem profissional específico</span>
+                          </div>
+                        </SelectItem>
+                        {professionals.map((prof) => (
+                          <SelectItem key={prof.id} value={prof.id.toString()}>
+                            <div className="flex items-center gap-2">
+                              <div className={cn('h-3 w-3 rounded-full', colorMap[prof.color || 'blue'])} />
+                              <span>{prof.name}</span>
+                              {prof.specialty && (
+                                <span className="text-xs text-muted-foreground">({prof.specialty})</span>
+                              )}
+                            </div>
+                          </SelectItem>
+                        ))}
+                      </>
                     )}
                   </SelectContent>
                 </Select>

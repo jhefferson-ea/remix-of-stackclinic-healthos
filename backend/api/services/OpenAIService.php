@@ -687,6 +687,9 @@ class OpenAIService {
         
         // Condicional: mostra linha de profissional só se necessário
         $profLine = $needsProf ? "Profissional: {$profStatus}\n" : "";
+        
+        // NOVO: Carrega regras customizadas da clínica
+        $customRulesSection = $this->getCustomRulesSection();
 
         $systemPrompt = <<<PROMPT
 Você é {$aiName}, atendente da {$clinicName}. HOJE: {$currentDate} ({$currentDayName}) às {$currentTime}
@@ -730,9 +733,42 @@ EXEMPLOS:
 - Se TODOS=✅ → chame createAppointment
 
 TOM: {$toneInstruction}
+{$customRulesSection}
 PROMPT;
 
         return $systemPrompt;
+    }
+    
+    /**
+     * Carrega regras customizadas da clínica e formata para o prompt
+     */
+    private function getCustomRulesSection() {
+        try {
+            $stmt = $this->db->prepare("
+                SELECT name, message FROM gatilhos_customizados 
+                WHERE clinica_id = :clinica_id AND enabled = 1
+                ORDER BY name
+            ");
+            $stmt->execute([':clinica_id' => $this->clinica['id']]);
+            $rules = $stmt->fetchAll();
+            
+            if (empty($rules)) {
+                return '';
+            }
+            
+            $rulesText = "\n═══════════════════════════════════════\n";
+            $rulesText .= "REGRAS PERSONALIZADAS DA CLÍNICA (SIGA OBRIGATORIAMENTE)\n";
+            $rulesText .= "═══════════════════════════════════════\n";
+            
+            foreach ($rules as $rule) {
+                $rulesText .= "- {$rule['name']}: {$rule['message']}\n";
+            }
+            
+            return $rulesText;
+        } catch (Exception $e) {
+            error_log("Erro ao carregar regras customizadas: " . $e->getMessage());
+            return '';
+        }
     }
     
     /**
