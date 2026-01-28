@@ -5,7 +5,7 @@ import { ptBR } from 'date-fns/locale';
 import { ChevronLeft, ChevronRight, Phone, Clock, CheckCircle, XCircle, AlertTriangle, Bell, Users, Plus, Ban, Loader2, CalendarDays, Filter } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-import { api, type Appointment, type AiSuggestion, type WaitingListPatient, type Block } from '@/services/api';
+import { api, type Appointment, type AiSuggestion, type WaitingListPatient, type Block, type WorkingHours } from '@/services/api';
 import { NewAppointmentModal } from '@/components/agenda/NewAppointmentModal';
 import { BlockTimeModal } from '@/components/agenda/BlockTimeModal';
 import { AppointmentDetailModal } from '@/components/agenda/AppointmentDetailModal';
@@ -41,6 +41,7 @@ export default function Agenda() {
   const [blocks, setBlocks] = useState<Block[]>([]);
   const [suggestions, setSuggestions] = useState<AiSuggestion[]>([]);
   const [waitingList, setWaitingList] = useState<WaitingListPatient[]>([]);
+  const [workingHours, setWorkingHours] = useState<WorkingHours[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isNewAppointmentOpen, setIsNewAppointmentOpen] = useState(false);
   const [isBlockTimeOpen, setIsBlockTimeOpen] = useState(false);
@@ -56,12 +57,13 @@ export default function Agenda() {
   async function loadData() {
     setIsLoading(true);
     
-    const [appointmentsRes, suggestionsRes, waitingRes] = await Promise.all([
+    const [appointmentsRes, suggestionsRes, waitingRes, clinicRes] = await Promise.all([
       // IMPORTANT: não depender do backend para filtrar por profissional.
       // A filtragem é feita no frontend para manter compatibilidade com backends antigos.
       api.getAppointments(undefined),
       api.getAiSuggestions(),
       api.getWaitingList(),
+      api.getClinicConfig(),
     ]);
 
     if (appointmentsRes.success && appointmentsRes.data) {
@@ -91,6 +93,9 @@ export default function Agenda() {
     }
     if (waitingRes.success && waitingRes.data) {
       setWaitingList(waitingRes.data);
+    }
+    if (clinicRes.success && clinicRes.data && clinicRes.data.working_hours) {
+      setWorkingHours(clinicRes.data.working_hours);
     }
     setIsLoading(false);
   }
@@ -136,7 +141,36 @@ export default function Agenda() {
       )
     : [currentDate];
 
-  const hours = Array.from({ length: 12 }).map((_, i) => 8 + i);
+  // Calculate hours dynamically based on clinic working hours
+  const getHoursRange = () => {
+    if (workingHours.length === 0) {
+      // Default fallback: 8:00 to 19:00
+      return Array.from({ length: 12 }).map((_, i) => 8 + i);
+    }
+    
+    // Find earliest open and latest close across all active days
+    let minHour = 23;
+    let maxHour = 0;
+    
+    workingHours.forEach(wh => {
+      if (wh.active) {
+        const openHour = parseInt(wh.open.split(':')[0]);
+        const closeHour = parseInt(wh.close.split(':')[0]);
+        if (openHour < minHour) minHour = openHour;
+        if (closeHour > maxHour) maxHour = closeHour;
+      }
+    });
+    
+    // If no active days found, use defaults
+    if (minHour >= maxHour) {
+      return Array.from({ length: 12 }).map((_, i) => 8 + i);
+    }
+    
+    const hoursCount = maxHour - minHour;
+    return Array.from({ length: hoursCount }).map((_, i) => minHour + i);
+  };
+  
+  const hours = getHoursRange();
 
   const statusColors: Record<string, string> = {
     confirmed: 'bg-success/20 border-success/40 text-success',
