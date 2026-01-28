@@ -64,7 +64,7 @@ class OpenAIService {
             WHERE pp.procedimento_id = :proc_id 
             AND pp.clinica_id = :clinica_id
             AND u.active = 1 
-            AND u.role = 'doctor'
+            AND u.role IN ('doctor','admin')
             ORDER BY u.name
         ");
         $stmt->execute([':proc_id' => $procedureId, ':clinica_id' => $clinicaId]);
@@ -85,7 +85,7 @@ class OpenAIService {
         $stmt = $this->db->prepare("
             SELECT id, name, specialty, color 
             FROM usuarios 
-            WHERE clinica_id = :clinica_id AND active = 1 AND role = 'doctor'
+            WHERE clinica_id = :clinica_id AND active = 1 AND role IN ('doctor','admin')
             ORDER BY name
         ");
         $stmt->execute([':clinica_id' => $clinicaId]);
@@ -143,7 +143,7 @@ class OpenAIService {
             FROM usuarios 
             WHERE clinica_id = :clinica_id 
             AND active = 1 
-            AND role = 'doctor'
+            AND role IN ('doctor','admin')
             AND LOWER(name) LIKE :name
             LIMIT 1
         ");
@@ -661,9 +661,10 @@ REGRAS ABSOLUTAS (SIGA OU A CONVERSA FALHARÁ):
 7. Use checkAvailability ANTES de oferecer horários.
 8. Só use createAppointment quando TODOS (incluindo telefone) estiverem ✅.
 9. NUNCA invente dados. Use EXATAMENTE o que está acima.
+10. NUNCA invente nomes de profissionais. Se precisar citar profissionais, use SOMENTE os nomes listados em "Profissional: ...".
 
 EXEMPLOS:
-- Se Procedimento=✅ e Profissional=❌ PERGUNTAR → "Você tem preferência por Dr. João ou Dra. Maria?"
+- Se Procedimento=✅ e Profissional=❌ PERGUNTAR → "Você tem preferência por algum profissional? (opções listadas acima)"
 - Se Profissional=✅ e Data=❌ → "Para qual data prefere?"
 - Se Data=✅ e Horário=❌ → chame checkAvailability, depois mostre opções
 - Se Horário=✅ e Nome=❌ → "Qual seu nome completo?"
